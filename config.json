@@ -1,0 +1,15 @@
+{
+  "name": "Engine Hours by Zone",
+  "supportEmail": "support@gpsfms.com",
+  "version": "2.0.0",
+  "items": [
+    {
+      "url": "https://austin-gpsfms.github.io/engine_hours_zone/dist/index.html",
+      "path": "ActivityLink/",
+      "menuName": {
+        "en": "Engine Hours by Zone"
+      }
+    }
+  ],
+  "isSigned": false
+}

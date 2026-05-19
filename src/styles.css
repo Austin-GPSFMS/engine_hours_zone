@@ -1,0 +1,242 @@
+/**
+ * Global styles for Engine Hours by Zone.
+ *
+ * Zenith ships its design tokens via @geotab/zenith/dist/index.css. Anything
+ * below layers GPSFMS-specific page chrome on top. Lean on Zenith primitives
+ * first — only add custom CSS where Zenith doesn't already cover it.
+ */
+
+@import "@geotab/zenith/dist/index.css";
+
+:root {
+  --gpsfms-navy: #25477b;
+  --gpsfms-dark: #1c2b39;
+  --gpsfms-blue: #0084c2;
+  --gpsfms-blue-soft: #e5f1f8;
+  --gpsfms-light: #f4f4f4;
+  --gpsfms-zone-accent: #10b981;
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+}
+
+#root {
+  display: flex;
+  flex-direction: column;
+}
+
+.ehz-page {
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-height: 100vh;
+  box-sizing: border-box;
+}
+
+.ehz-page-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 16px;
+}
+
+.ehz-page-header h2 {
+  margin: 0;
+  font-size: 20px;
+  color: var(--gpsfms-dark);
+}
+
+.ehz-page-header p {
+  margin: 4px 0 0;
+  color: #6b7280;
+  font-size: 13px;
+}
+
+.ehz-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+}
+
+.ehz-toolbar > * {
+  min-width: 0;
+}
+
+.ehz-summary {
+  border: 1px solid #e5e7eb;
+  border-radius: 6px;
+  padding: 14px 16px;
+  background: #fff;
+}
+
+.ehz-summary h3 {
+  margin: 0 0 10px;
+  font-size: 16px;
+  color: var(--gpsfms-dark);
+}
+
+.ehz-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 12px;
+}
+
+.ehz-summary-grid > div {
+  display: flex;
+  flex-direction: column;
+}
+
+.ehz-summary-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #6b7280;
+  margin-bottom: 2px;
+}
+
+.ehz-summary-value {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--gpsfms-dark);
+}
+
+.ehz-section-heading {
+  margin: 24px 0 8px;
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--gpsfms-dark);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.ehz-table-wrap {
+  background: #fff;
+  border: 1px solid #e5e7eb;
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.ehz-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 14px;
+}
+
+.ehz-table th,
+.ehz-table td {
+  text-align: left;
+  padding: 8px 12px;
+  border-bottom: 1px solid #e5e7eb;
+}
+
+.ehz-table th {
+  background: #f3f4f6;
+  font-weight: 600;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #4b5563;
+}
+
+.ehz-table tr:last-child td {
+  border-bottom: 0;
+}
+
+.ehz-table tr:hover td {
+  background: #f9fafb;
+}
+
+.ehz-maplink {
+  color: var(--gpsfms-blue);
+  text-decoration: none;
+  font-size: 12px;
+  margin-left: 6px;
+}
+
+.ehz-maplink:hover {
+  text-decoration: underline;
+}
+
+.ehz-timeline {
+  border-left: 2px solid #e5e7eb;
+  padding-left: 14px;
+}
+
+.ehz-timeline-day {
+  font-size: 12px;
+  font-weight: 700;
+  color: #6b7280;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin: 14px 0 6px -16px;
+  padding: 4px 8px;
+  background: #f3f4f6;
+  display: inline-block;
+  border-radius: 3px;
+}
+
+.ehz-tl-row {
+  display: flex;
+  gap: 12px;
+  padding: 8px 0;
+  align-items: baseline;
+}
+
+.ehz-tl-time {
+  flex: 0 0 130px;
+  font-variant-numeric: tabular-nums;
+  color: #6b7280;
+  font-size: 13px;
+}
+
+.ehz-tl-body {
+  flex: 1;
+  font-size: 14px;
+}
+
+.ehz-tl-stats {
+  font-size: 13px;
+  color: #4b5563;
+  margin-top: 2px;
+}
+
+.ehz-tl-zone .ehz-tl-body {
+  border-left: 3px solid var(--gpsfms-zone-accent);
+  padding-left: 10px;
+}
+
+.ehz-tl-transit .ehz-tl-body {
+  color: #6b7280;
+  font-style: italic;
+}
+
+.ehz-footer {
+  margin-top: 28px;
+  padding-top: 14px;
+  border-top: 1px solid #e5e7eb;
+  color: #9ca3af;
+  font-size: 12px;
+}
+
+.ehz-footer code {
+  background: #f3f4f6;
+  padding: 1px 4px;
+  border-radius: 3px;
+  font-size: 11px;
+}
+
+.ehz-empty {
+  padding: 24px;
+  text-align: center;
+  color: #6b7280;
+  background: #f9fafb;
+  border: 1px dashed #e5e7eb;
+  border-radius: 6px;
+}
