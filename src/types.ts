@@ -113,9 +113,13 @@ export interface TripSegment {
   /** Zone the vehicle departed from — the previous stop's cluster. */
   fromZoneId: string | null;
   fromAddress: string | null;
+  fromLat: number | null;
+  fromLng: number | null;
   /** Zone the vehicle arrived at — the next stop's cluster. */
   toZoneId: string | null;
   toAddress: string | null;
+  toLat: number | null;
+  toLng: number | null;
   entryEngineSeconds: number | null;
   exitEngineSeconds: number | null;
   accumulatedEngineSeconds: number | null;

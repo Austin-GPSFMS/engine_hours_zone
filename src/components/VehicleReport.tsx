@@ -145,13 +145,13 @@ function SegmentRow({ segment }: { segment: Segment }) {
             <div className="ehz-tl-from-to">
               {from && (
                 <>
-                  <span className="ehz-tl-label">From:</span> {from}
+                  <span className="ehz-tl-label">Origin:</span> {from}
                 </>
               )}
               {from && to && <span style={{ margin: "0 6px" }}>→</span>}
               {to && (
                 <>
-                  <span className="ehz-tl-label">To:</span> {to}
+                  <span className="ehz-tl-label">Destination:</span> {to}
                 </>
               )}
             </div>

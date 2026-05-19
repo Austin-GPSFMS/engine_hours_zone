@@ -5,7 +5,9 @@
  *              - GPSFMS logo (top-left)
  *              - Title, period, timezone, cluster radius, generation time
  *              - Then the flat segment table with auto-filter + frozen
- *                header & vehicle column
+ *                header & vehicle column. Origin/Destination cells combine
+ *                "Zx: address" for easy scanning, the rightmost Map cell
+ *                opens the location in Google Maps.
  *   Sheet 2: "Zones"    — per-vehicle zone roll-up
  *   Sheet 3: "Report Metadata" — full provenance block
  *   Sheet 4: "Failed Vehicles" — only added if any vehicles errored out
@@ -36,6 +38,15 @@ const LABEL_FONT: Partial<ExcelJS.Font> = {
   bold: true,
   color: { argb: "FF1C2B39" },
 };
+const LINK_FONT: Partial<ExcelJS.Font> = {
+  color: { argb: "FF0084C2" },
+  underline: true,
+};
+const STRIPE_FILL: ExcelJS.Fill = {
+  type: "pattern",
+  pattern: "solid",
+  fgColor: { argb: "FFF6F8FA" },
+};
 
 function styleHeaderRow(row: ExcelJS.Row) {
   row.eachCell((cell) => {
@@ -54,6 +65,32 @@ function msToHours(ms: number | null | undefined): number | null {
 
 function kmToMi(km: number | null | undefined): number | null {
   return km == null ? null : Number((km / KM_PER_MILE).toFixed(2));
+}
+
+/** "Z1: 3908 Veterans Pkwy, Garner, NC" — empty string when both pieces are missing. */
+function formatLocation(
+  zoneId: string | null | undefined,
+  address: string | null | undefined
+): string {
+  const z = zoneId ?? "";
+  const a = address ?? "";
+  if (z && a) return `${z}: ${a}`;
+  return z || a;
+}
+
+/** Build a Google Maps URL — prefers lat/lng coords, falls back to address text. */
+function mapsUrl(
+  lat: number | null | undefined,
+  lng: number | null | undefined,
+  address: string | null | undefined
+): string | null {
+  if (lat != null && lng != null) {
+    return `https://www.google.com/maps?q=${lat},${lng}`;
+  }
+  if (address) {
+    return `https://www.google.com/maps?q=${encodeURIComponent(address)}`;
+  }
+  return null;
 }
 
 /** Fetch the bundled logo asset as raw bytes for embedding in the workbook. */
@@ -76,7 +113,6 @@ export async function exportToXlsx(report: MultiVehicleReport): Promise<void> {
   wb.creator = "GPSFMS Engine Hours by Zone";
   wb.created = new Date();
 
-  // Load the logo once so we can drop it into multiple sheets if needed.
   let logoImageId: number | null = null;
   try {
     const bytes = await loadLogoBytes();
@@ -90,7 +126,6 @@ export async function exportToXlsx(report: MultiVehicleReport): Promise<void> {
   writeMetadataSheet(wb, report);
   writeFailuresSheet(wb, report);
 
-  // ---------- Download ----------
   const buf = await wb.xlsx.writeBuffer();
   const blob = new Blob([buf], {
     type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -119,15 +154,12 @@ const SEGMENT_HEADERS = [
   "End",
   "Duration (hrs)",
   "Distance (mi)",
-  "From Zone",
-  "From Address",
-  "Zone",
-  "Address",
-  "Latitude",
-  "Longitude",
+  "Origin",
+  "Destination",
   "Entry EH (hrs)",
   "Exit EH (hrs)",
   "Δ EH (hrs)",
+  "Map",
 ];
 
 const SEGMENT_COL_WIDTHS = [
@@ -139,18 +171,14 @@ const SEGMENT_COL_WIDTHS = [
   20, // End
   14, // Duration
   14, // Distance
-  10, // From Zone
-  40, // From Address
-  10, // Zone
-  40, // Address
-  12, // Latitude
-  12, // Longitude
+  50, // Origin
+  50, // Destination
   14, // Entry EH
   14, // Exit EH
   12, // Δ EH
+  14, // Map
 ];
 
-/** Row at which the data header sits. Anything above is logo + metadata. */
 const SEGMENTS_HEADER_ROW = 8;
 
 async function writeSegmentsSheet(
@@ -167,12 +195,17 @@ async function writeSegmentsSheet(
     seg.getColumn(i + 1).width = w;
   });
 
+  // Origin / Destination columns wrap their text so the full address stays
+  // visible without manually resizing.
+  seg.getColumn(9).alignment = { wrapText: true, vertical: "top" };
+  seg.getColumn(10).alignment = { wrapText: true, vertical: "top" };
+
   // Reserve some height for the logo / metadata area
   for (let r = 1; r <= SEGMENTS_HEADER_ROW - 1; r++) {
     seg.getRow(r).height = 22;
   }
 
-  // Logo (anchored to A1, fixed pixel extent so cell widths don't distort it).
+  // Logo
   if (logoImageId != null) {
     seg.addImage(logoImageId, {
       tl: { col: 0.2, row: 0.2 },
@@ -187,7 +220,7 @@ async function writeSegmentsSheet(
   titleCell.font = TITLE_FONT;
   titleCell.alignment = { vertical: "middle" };
 
-  // Metadata block in rows 3-6, columns C:D
+  // Metadata block in rows 3-6, columns C:F
   const metaRows: Array<[string, string | number]> = [
     [
       "Period:",
@@ -206,10 +239,12 @@ async function writeSegmentsSheet(
     seg.getCell(`D${r}`).value = value;
   });
 
-  // Roll-up totals on the right (cols H-I rows 3-6) so the user has the
-  // headline numbers visible without scrolling to the Metadata sheet.
+  // Roll-up totals on the right (cols H-J rows 3-6)
   const totalsRows: Array<[string, string | number]> = [
-    ["Vehicles:", `${report.totals.successfulVehicleCount} of ${report.totals.vehicleCount}`],
+    [
+      "Vehicles:",
+      `${report.totals.successfulVehicleCount} of ${report.totals.vehicleCount}`,
+    ],
     ["Total segments:", report.totals.totalSegments],
     [
       "Stop engine hours:",
@@ -238,52 +273,60 @@ async function writeSegmentsSheet(
 
   // Data rows
   let rowIdx = SEGMENTS_HEADER_ROW + 1;
+  let zebra = false;
   for (const v of report.vehicles) {
     if (v.error) continue;
     for (const day of v.days) {
       for (const s of day.segments) {
         const r = seg.getRow(rowIdx++);
+        zebra = !zebra;
+
+        let origin = "";
+        let destination = "";
+        let url: string | null = null;
+
         if (s.type === "trip") {
-          r.values = [
-            v.deviceName,
-            day.day,
-            day.dayLabel,
-            "Trip",
-            formatDateTime(s.start),
-            formatDateTime(s.end),
-            msToHours(s.durationMs),
-            kmToMi(s.distanceKm),
-            s.fromZoneId ?? "",
-            s.fromAddress ?? "",
-            // For trip rows, "Zone/Address" is where the trip ended (== next stop).
-            s.toZoneId ?? "",
-            s.toAddress ?? "",
-            null,
-            null,
-            secToHours(s.entryEngineSeconds),
-            secToHours(s.exitEngineSeconds),
-            secToHours(s.accumulatedEngineSeconds),
-          ];
+          origin = formatLocation(s.fromZoneId, s.fromAddress);
+          destination = formatLocation(s.toZoneId, s.toAddress);
+          // Map link points to the destination so the user can see where
+          // this trip ended up.
+          url = mapsUrl(s.toLat, s.toLng, s.toAddress);
         } else {
-          r.values = [
-            v.deviceName,
-            day.day,
-            day.dayLabel,
-            "Stop",
-            formatDateTime(s.start),
-            formatDateTime(s.end),
-            msToHours(s.durationMs),
-            null,
-            "",
-            "",
-            s.clusterId,
-            s.address ?? "",
-            Number(s.lat.toFixed(6)),
-            Number(s.lng.toFixed(6)),
-            secToHours(s.entryEngineSeconds),
-            secToHours(s.exitEngineSeconds),
-            secToHours(s.accumulatedEngineSeconds),
-          ];
+          // Stops sit at a single location — fill both columns the same
+          // way so filters like "Origin = Z1" still surface the stop.
+          const loc = formatLocation(s.clusterId, s.address);
+          origin = loc;
+          destination = loc;
+          url = mapsUrl(s.lat, s.lng, s.address);
+        }
+
+        r.getCell(1).value = v.deviceName;
+        r.getCell(2).value = day.day;
+        r.getCell(3).value = day.dayLabel;
+        r.getCell(4).value = s.type === "trip" ? "Trip" : "Stop";
+        r.getCell(5).value = formatDateTime(s.start);
+        r.getCell(6).value = formatDateTime(s.end);
+        r.getCell(7).value = msToHours(s.durationMs);
+        r.getCell(8).value =
+          s.type === "trip" ? kmToMi(s.distanceKm) : null;
+        r.getCell(9).value = origin;
+        r.getCell(10).value = destination;
+        r.getCell(11).value = secToHours(s.entryEngineSeconds);
+        r.getCell(12).value = secToHours(s.exitEngineSeconds);
+        r.getCell(13).value = secToHours(s.accumulatedEngineSeconds);
+
+        if (url) {
+          const mapCell = r.getCell(14);
+          mapCell.value = { text: "Open in Maps", hyperlink: url };
+          mapCell.font = LINK_FONT;
+        }
+
+        // Subtle zebra striping for readability.
+        if (zebra) {
+          for (let c = 1; c <= SEGMENT_HEADERS.length; c++) {
+            const cell = r.getCell(c);
+            if (!cell.fill) cell.fill = STRIPE_FILL;
+          }
         }
       }
     }
@@ -310,27 +353,33 @@ function writeZonesSheet(wb: ExcelJS.Workbook, report: MultiVehicleReport) {
     { header: "Visits", key: "visits", width: 8 },
     { header: "Total Stopped (hrs)", key: "stopped", width: 18 },
     { header: "Engine Hours Accumulated", key: "engineHours", width: 22 },
+    { header: "Map", key: "map", width: 14 },
   ];
   styleHeaderRow(zones.getRow(1));
-  zones.autoFilter = { from: { row: 1, column: 1 }, to: { row: 1, column: 8 } };
+  zones.autoFilter = { from: { row: 1, column: 1 }, to: { row: 1, column: 9 } };
   zones.views = [{ state: "frozen", ySplit: 1 }];
 
+  let rowIdx = 2;
   for (const v of report.vehicles) {
     if (v.error) continue;
     const sorted = v.clusters
       .slice()
       .sort((a, b) => b.totalEngineSeconds - a.totalEngineSeconds);
     for (const c of sorted) {
-      zones.addRow({
-        vehicle: v.deviceName,
-        zone: c.id,
-        address: c.address ?? "",
-        lat: Number(c.centerLat.toFixed(6)),
-        lng: Number(c.centerLng.toFixed(6)),
-        visits: c.visits,
-        stopped: msToHours(c.totalStoppedMs),
-        engineHours: secToHours(c.totalEngineSeconds),
-      });
+      const row = zones.getRow(rowIdx++);
+      row.getCell(1).value = v.deviceName;
+      row.getCell(2).value = c.id;
+      row.getCell(3).value = c.address ?? "";
+      row.getCell(4).value = Number(c.centerLat.toFixed(6));
+      row.getCell(5).value = Number(c.centerLng.toFixed(6));
+      row.getCell(6).value = c.visits;
+      row.getCell(7).value = msToHours(c.totalStoppedMs);
+      row.getCell(8).value = secToHours(c.totalEngineSeconds);
+      const url = mapsUrl(c.centerLat, c.centerLng, c.address);
+      if (url) {
+        row.getCell(9).value = { text: "Open in Maps", hyperlink: url };
+        row.getCell(9).font = LINK_FONT;
+      }
     }
   }
 }
