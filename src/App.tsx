@@ -1,9 +1,10 @@
 /**
  * Engine Hours by Zone — main app.
  *
- *   Toolbar: Vehicle dropdown · Date range · Run / Export buttons
- *   Banners: standalone preview, errors
- *   Results: Summary KPIs · Zones table · Chronological timeline
+ *   Toolbar: Group filter · Vehicle multi-select · Date range · Radius
+ *            Buttons: Run · Export
+ *   Banners: standalone, errors, progress
+ *   Results: Summary KPIs · One VehicleReport per selected vehicle
  *
  * Same Zenith vocabulary as the Advanced Report Builder so the page reads
  * native inside MyGeotab.
@@ -13,8 +14,6 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Banner,
   Button,
-  Card,
-  Content,
   DateRange,
   Dropdown,
   GET_LAST_SEVEN_DAYS_OPTION,
@@ -29,28 +28,23 @@ import {
   type ISelectionItem,
 } from "@geotab/zenith";
 import type {
-  Cluster,
   GeotabApi,
   GeotabDevice,
+  GeotabGroup,
   GeotabPageState,
-  ZoneReport,
+  MultiVehicleReport,
 } from "./types";
 import {
-  fetchAddresses,
   fetchDevices,
-  fetchTripsAndEngineHours,
+  fetchGroups,
   friendlyError,
 } from "./api/geotab";
-import {
-  buildStops,
-  buildTimeline,
-  clusterStops,
-  ONE_MILE_METERS,
-} from "./utils/cluster";
+import { ONE_MILE_METERS } from "./utils/cluster";
+import { buildMultiVehicleReport } from "./utils/multiVehicle";
 import { exportToXlsx } from "./utils/export";
 import { Summary } from "./components/Summary";
-import { ZoneTable } from "./components/ZoneTable";
-import { Timeline } from "./components/Timeline";
+import { VehicleReport } from "./components/VehicleReport";
+import { GroupFilterPicker } from "./components/GroupFilterPicker";
 
 interface AppProps {
   api: GeotabApi | null;
@@ -75,6 +69,8 @@ const radiusItems: ISelectionItem[] = [
   { id: "3218.69", name: "Radius: 2 miles" },
 ];
 
+const ALL_VEHICLES_ID = "__ALL__";
+
 function defaultDateRange(): IDateRangeValue {
   const last7 = GET_LAST_SEVEN_DAYS_OPTION();
   const r = last7.getRange();
@@ -84,57 +80,117 @@ function defaultDateRange(): IDateRangeValue {
 export default function App({ api, pageState: _pageState }: AppProps) {
   const insideMyGeotab = api != null;
 
-  // ---- State ----
+  // ---- Groups & devices ----
+  const [groupsById, setGroupsById] = useState<Map<string, GeotabGroup>>(
+    () => new Map()
+  );
+  const [groupsLoaded, setGroupsLoaded] = useState(false);
+  const [groupsErr, setGroupsErr] = useState<string | null>(null);
+
+  const [selectedGroupIds, setSelectedGroupIds] = useState<string[]>([
+    "GroupCompanyId",
+  ]);
+
   const [devices, setDevices] = useState<GeotabDevice[]>([]);
-  const [devicesLoaded, setDevicesLoaded] = useState(false);
+  const [devicesLoading, setDevicesLoading] = useState(false);
   const [devicesErr, setDevicesErr] = useState<string | null>(null);
 
-  const [selectedDeviceId, setSelectedDeviceId] = useState<string | null>(null);
+  const [selectedDeviceIds, setSelectedDeviceIds] = useState<string[]>([]);
+
+  // ---- Form ----
   const [dateRange, setDateRange] = useState<IDateRangeValue>(() =>
     defaultDateRange()
   );
   const [radiusMeters, setRadiusMeters] = useState<number>(ONE_MILE_METERS);
 
+  // ---- Build state ----
   const [isBuilding, setIsBuilding] = useState(false);
   const [buildErr, setBuildErr] = useState<string | null>(null);
-  const [report, setReport] = useState<ZoneReport | null>(null);
-
+  const [report, setReport] = useState<MultiVehicleReport | null>(null);
+  const [progress, setProgress] = useState<{
+    done: number;
+    total: number;
+    currentName: string;
+  } | null>(null);
   const [isExporting, setIsExporting] = useState(false);
 
-  // ---- Device load ----
+  // ---- Initial group load ----
   useEffect(() => {
     if (!api) return;
     let cancelled = false;
-    fetchDevices(api)
-      .then((ds) => {
+    fetchGroups(api)
+      .then((m) => {
         if (cancelled) return;
-        setDevices(ds);
-        setDevicesLoaded(true);
+        setGroupsById(m);
+        setGroupsLoaded(true);
       })
       .catch((e) => {
         if (cancelled) return;
-        setDevicesErr(friendlyError(e));
-        setDevicesLoaded(true);
+        setGroupsErr(friendlyError(e));
+        setGroupsLoaded(true);
       });
     return () => {
       cancelled = true;
     };
   }, [api]);
 
-  const deviceItems = useMemo<ISelectionItem[]>(
-    () =>
-      devices.map((d) => ({
-        id: d.id,
-        name: d.name ?? d.id,
-      })),
+  // ---- Re-fetch devices when group filter changes ----
+  useEffect(() => {
+    if (!api) return;
+    let cancelled = false;
+    setDevicesLoading(true);
+    setDevicesErr(null);
+    fetchDevices(api, selectedGroupIds, false)
+      .then((ds) => {
+        if (cancelled) return;
+        setDevices(ds);
+        // Drop any selected device IDs that fell out of the new group scope.
+        setSelectedDeviceIds((prev) => {
+          const inScope = new Set(ds.map((d) => d.id));
+          return prev.filter((id) => id === ALL_VEHICLES_ID || inScope.has(id));
+        });
+      })
+      .catch((e) => {
+        if (cancelled) return;
+        setDevicesErr(friendlyError(e));
+      })
+      .finally(() => {
+        if (!cancelled) setDevicesLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [api, selectedGroupIds]);
+
+  // ---- Build vehicle picker items ----
+  const deviceItems = useMemo<ISelectionItem[]>(() => {
+    const all: ISelectionItem = {
+      id: ALL_VEHICLES_ID,
+      name: `All vehicles in group (${devices.length})`,
+    };
+    return [
+      all,
+      ...devices.map((d) => ({ id: d.id, name: d.name ?? d.id })),
+    ];
+  }, [devices]);
+
+  const effectiveDeviceIds = useMemo<string[]>(() => {
+    if (selectedDeviceIds.includes(ALL_VEHICLES_ID)) {
+      return devices.map((d) => d.id);
+    }
+    return selectedDeviceIds;
+  }, [selectedDeviceIds, devices]);
+
+  const devicesById = useMemo(
+    () => new Map(devices.map((d) => [d.id, d])),
     [devices]
   );
 
   // ---- Handlers ----
-  const onBuild = useCallback(async () => {
+  const onRun = useCallback(async () => {
     if (!api) return;
-    if (!selectedDeviceId) {
-      setBuildErr("Pick a vehicle.");
+    if (effectiveDeviceIds.length === 0) {
+      setBuildErr("Pick at least one vehicle.");
       return;
     }
     if (!dateRange.from || !dateRange.to) {
@@ -144,62 +200,28 @@ export default function App({ api, pageState: _pageState }: AppProps) {
     setBuildErr(null);
     setReport(null);
     setIsBuilding(true);
+    setProgress({ done: 0, total: effectiveDeviceIds.length, currentName: "" });
     try {
       const fromISO = new Date(dateRange.from).toISOString();
       const toISO = new Date(dateRange.to).toISOString();
-      const device = devices.find((d) => d.id === selectedDeviceId);
-      const deviceName = device?.name ?? selectedDeviceId;
-
-      const { trips, engineHours } = await fetchTripsAndEngineHours(
+      const r = await buildMultiVehicleReport({
         api,
-        selectedDeviceId,
-        fromISO,
-        toISO
-      );
-      if (!trips || trips.length < 2) {
-        throw new Error(
-          `Need at least two trips in the date range to identify stops between them. Found ${trips?.length ?? 0}.`
-        );
-      }
-      const stops = buildStops(trips, engineHours);
-      if (stops.length === 0) {
-        throw new Error("No usable stops found in this date range.");
-      }
-      const clusters: Cluster[] = clusterStops(stops, radiusMeters);
-
-      // Reverse-geocode all cluster centers in one call.
-      const addresses = await fetchAddresses(
-        api,
-        clusters.map((c) => ({ lat: c.centerLat, lng: c.centerLng }))
-      );
-      clusters.forEach((c, i) => {
-        c.address =
-          addresses[i] ?? `${c.centerLat.toFixed(5)}, ${c.centerLng.toFixed(5)}`;
-      });
-
-      const events = buildTimeline(trips, clusters);
-      const totalZoneEngineSeconds = clusters.reduce(
-        (acc, c) => acc + c.totalEngineSeconds,
-        0
-      );
-
-      setReport({
-        deviceName,
+        deviceIds: effectiveDeviceIds,
+        devicesById,
         fromDate: fromISO,
         toDate: toISO,
-        clusters,
-        events,
-        totals: {
-          totalVisits: stops.length,
-          totalZoneEngineSeconds,
-        },
+        radiusMeters,
+        onProgress: (done, total, currentName) =>
+          setProgress({ done, total, currentName }),
       });
+      setReport(r);
     } catch (e) {
       setBuildErr(friendlyError(e));
     } finally {
       setIsBuilding(false);
+      setProgress(null);
     }
-  }, [api, selectedDeviceId, dateRange, devices, radiusMeters]);
+  }, [api, effectiveDeviceIds, dateRange, devicesById, radiusMeters]);
 
   const onExport = useCallback(async () => {
     if (!report) return;
@@ -213,15 +235,25 @@ export default function App({ api, pageState: _pageState }: AppProps) {
     }
   }, [report]);
 
-  const onDeviceChange = (items: ISelectionItem[]) => {
-    const id = items[0]?.id;
-    setSelectedDeviceId(id != null ? String(id) : null);
+  const onDevicesChange = (items: ISelectionItem[]) => {
+    // If "All" got picked, collapse the selection to just All so the chip
+    // count stays small.
+    const ids = items.map((i) => String(i.id));
+    if (ids.includes(ALL_VEHICLES_ID)) {
+      setSelectedDeviceIds([ALL_VEHICLES_ID]);
+    } else {
+      setSelectedDeviceIds(ids);
+    }
   };
 
   const onRadiusChange = (items: ISelectionItem[]) => {
     const id = items[0]?.id;
     if (id != null) setRadiusMeters(parseFloat(String(id)));
   };
+
+  const onGroupsChange = useCallback((ids: string[]) => {
+    setSelectedGroupIds(ids.length > 0 ? ids : ["GroupCompanyId"]);
+  }, []);
 
   // ---- Render ----
   return (
@@ -230,8 +262,8 @@ export default function App({ api, pageState: _pageState }: AppProps) {
         <div>
           <h2>Engine Hours by Zone</h2>
           <p>
-            Where did this vehicle accumulate engine hours? Stops within the
-            chosen radius of each other are grouped into a single zone.
+            Multi-vehicle, trip-level breakdown of engine hours by location.
+            Stops within the chosen radius are clustered into a zone.
           </p>
         </div>
         <div style={{ display: "flex", gap: 8 }}>
@@ -244,25 +276,44 @@ export default function App({ api, pageState: _pageState }: AppProps) {
           </Button>
           <Button
             type="primary"
-            onClick={onBuild}
-            disabled={!insideMyGeotab || isBuilding || !devicesLoaded}
+            onClick={onRun}
+            disabled={
+              !insideMyGeotab ||
+              isBuilding ||
+              devicesLoading ||
+              effectiveDeviceIds.length === 0
+            }
           >
-            {isBuilding ? "Building…" : "Run report"}
+            {isBuilding ? "Running…" : "Run report"}
           </Button>
         </div>
       </header>
 
       <div className="ehz-toolbar">
+        {groupsLoaded ? (
+          <GroupFilterPicker
+            groupsById={groupsById}
+            initialGroupIds={selectedGroupIds}
+            onChange={onGroupsChange}
+            onError={(e) => setGroupsErr(e.message)}
+          />
+        ) : (
+          <div style={{ color: "#6b7280", fontSize: 13, fontStyle: "italic" }}>
+            Loading groups…
+          </div>
+        )}
         <Dropdown
-          value={selectedDeviceId ? [selectedDeviceId] : []}
+          value={selectedDeviceIds}
           dataItems={deviceItems}
-          onChange={onDeviceChange}
-          errorHandler={(e) => console.error("[EHZ] Vehicle:", e)}
+          onChange={onDevicesChange}
+          errorHandler={(e) => console.error("[EHZ] Vehicles:", e)}
           forceSelection={false}
-          multiselect={false}
+          multiselect
           showSelection
-          showCounterPill={false}
-          placeholder={devicesLoaded ? "Select vehicle" : "Loading vehicles…"}
+          showCounterPill
+          placeholder={
+            devicesLoading ? "Loading vehicles…" : "Select vehicles"
+          }
         />
         <DateRange
           options={dateRangeOptions}
@@ -290,6 +341,11 @@ export default function App({ api, pageState: _pageState }: AppProps) {
             Open this page from inside MyGeotab to query live data.
           </Banner>
         )}
+        {groupsErr && (
+          <Banner type="error" header="Couldn't load groups">
+            {groupsErr}
+          </Banner>
+        )}
         {devicesErr && (
           <Banner type="error" header="Couldn't load vehicles">
             {devicesErr}
@@ -300,29 +356,44 @@ export default function App({ api, pageState: _pageState }: AppProps) {
             {buildErr}
           </Banner>
         )}
+        {progress && (
+          <div className="ehz-progress">
+            <span>
+              Processing vehicle {progress.done} of {progress.total}
+              {progress.currentName ? ` — ${progress.currentName}` : ""}
+            </span>
+            <div className="ehz-progress-bar">
+              <div
+                style={{
+                  width: `${(progress.done / Math.max(1, progress.total)) * 100}%`,
+                }}
+              />
+            </div>
+          </div>
+        )}
       </div>
 
       {report ? (
         <>
           <Summary report={report} />
-
-          <Card title="Zones" fullWidth>
-            <Content>
-              <ZoneTable clusters={report.clusters} />
-            </Content>
-          </Card>
-
-          <Card title="Timeline" fullWidth>
-            <Content>
-              <Timeline events={report.events} />
-            </Content>
-          </Card>
+          <div
+            style={{
+              display: "flex",
+              flexDirection: "column",
+              gap: 12,
+            }}
+          >
+            {report.vehicles.map((v) => (
+              <VehicleReport key={v.deviceId} vehicle={v} />
+            ))}
+          </div>
         </>
       ) : (
         !isBuilding &&
         insideMyGeotab && (
           <div className="ehz-empty">
-            Pick a vehicle and date range, then click <strong>Run report</strong>.
+            Pick a group + vehicle(s) + date range, then click{" "}
+            <strong>Run report</strong>.
           </div>
         )
       )}
@@ -331,7 +402,9 @@ export default function App({ api, pageState: _pageState }: AppProps) {
         <small>
           Engine hours sourced from{" "}
           <code>DiagnosticEngineHoursAdjustmentId</code>. Values interpolated
-          between bracketing StatusData samples.
+          between bracketing StatusData samples. Trip and stop boundaries from
+          the Trip object's <code>start</code> / <code>stop</code> /{" "}
+          <code>nextTripStart</code>.
         </small>
       </footer>
     </div>

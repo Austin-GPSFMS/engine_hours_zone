@@ -15,6 +15,7 @@
   --gpsfms-blue-soft: #e5f1f8;
   --gpsfms-light: #f4f4f4;
   --gpsfms-zone-accent: #10b981;
+  --gpsfms-trip-accent: #6366f1;
 }
 
 html,
@@ -69,6 +70,32 @@ body,
   min-width: 0;
 }
 
+.ehz-progress {
+  background: #eff6ff;
+  border: 1px solid #bfdbfe;
+  color: #1e40af;
+  padding: 8px 12px;
+  border-radius: 4px;
+  font-size: 13px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.ehz-progress-bar {
+  flex: 1;
+  height: 6px;
+  background: #dbeafe;
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.ehz-progress-bar > div {
+  height: 100%;
+  background: var(--gpsfms-blue);
+  transition: width 0.2s ease;
+}
+
 .ehz-summary {
   border: 1px solid #e5e7eb;
   border-radius: 6px;
@@ -107,20 +134,92 @@ body,
   color: var(--gpsfms-dark);
 }
 
-.ehz-section-heading {
-  margin: 24px 0 8px;
-  font-size: 14px;
-  font-weight: 700;
-  color: var(--gpsfms-dark);
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
+/* ---- Vehicle / Day / Segment hierarchy ---- */
+
+.ehz-vehicle {
+  background: #fff;
+  border: 1px solid #e5e7eb;
+  border-radius: 6px;
+  overflow: hidden;
 }
+
+.ehz-vehicle-header {
+  width: 100%;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+  background: #f9fafb;
+  border: 0;
+  border-bottom: 1px solid #e5e7eb;
+  padding: 10px 14px;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  color: var(--gpsfms-dark);
+}
+
+.ehz-vehicle-header:hover {
+  background: #f3f4f6;
+}
+
+.ehz-vehicle-name {
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.ehz-vehicle-stats {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+  font-size: 12px;
+  color: #4b5563;
+}
+
+.ehz-vehicle-body {
+  padding: 12px 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.ehz-day {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.ehz-day-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--gpsfms-dark);
+  padding: 4px 0;
+}
+
+.ehz-day-label {
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-size: 12px;
+  color: #6b7280;
+}
+
+.ehz-day-stats {
+  font-size: 12px;
+  color: #4b5563;
+  font-weight: 400;
+}
+
+/* ---- Tables ---- */
 
 .ehz-table-wrap {
   background: #fff;
   border: 1px solid #e5e7eb;
   border-radius: 6px;
-  overflow: hidden;
+  overflow-x: auto;
 }
 
 .ehz-table {
@@ -132,14 +231,15 @@ body,
 .ehz-table th,
 .ehz-table td {
   text-align: left;
-  padding: 8px 12px;
+  padding: 6px 10px;
   border-bottom: 1px solid #e5e7eb;
+  vertical-align: top;
 }
 
 .ehz-table th {
   background: #f3f4f6;
   font-weight: 600;
-  font-size: 12px;
+  font-size: 11px;
   text-transform: uppercase;
   letter-spacing: 0.04em;
   color: #4b5563;
@@ -153,6 +253,38 @@ body,
   background: #f9fafb;
 }
 
+.ehz-table .ehz-num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.ehz-segments .ehz-row-stop td {
+  background: rgba(16, 185, 129, 0.04);
+}
+
+.ehz-segments .ehz-row-trip td {
+  background: rgba(99, 102, 241, 0.02);
+}
+
+.ehz-pill {
+  display: inline-block;
+  padding: 1px 8px;
+  border-radius: 10px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.ehz-pill-trip {
+  background: rgba(99, 102, 241, 0.12);
+  color: #4338ca;
+}
+
+.ehz-pill-stop {
+  background: rgba(16, 185, 129, 0.12);
+  color: #047857;
+}
+
 .ehz-maplink {
   color: var(--gpsfms-blue);
   text-decoration: none;
@@ -164,57 +296,13 @@ body,
   text-decoration: underline;
 }
 
-.ehz-timeline {
-  border-left: 2px solid #e5e7eb;
-  padding-left: 14px;
-}
-
-.ehz-timeline-day {
-  font-size: 12px;
-  font-weight: 700;
+.ehz-empty {
+  padding: 24px;
+  text-align: center;
   color: #6b7280;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  margin: 14px 0 6px -16px;
-  padding: 4px 8px;
-  background: #f3f4f6;
-  display: inline-block;
-  border-radius: 3px;
-}
-
-.ehz-tl-row {
-  display: flex;
-  gap: 12px;
-  padding: 8px 0;
-  align-items: baseline;
-}
-
-.ehz-tl-time {
-  flex: 0 0 130px;
-  font-variant-numeric: tabular-nums;
-  color: #6b7280;
-  font-size: 13px;
-}
-
-.ehz-tl-body {
-  flex: 1;
-  font-size: 14px;
-}
-
-.ehz-tl-stats {
-  font-size: 13px;
-  color: #4b5563;
-  margin-top: 2px;
-}
-
-.ehz-tl-zone .ehz-tl-body {
-  border-left: 3px solid var(--gpsfms-zone-accent);
-  padding-left: 10px;
-}
-
-.ehz-tl-transit .ehz-tl-body {
-  color: #6b7280;
-  font-style: italic;
+  background: #f9fafb;
+  border: 1px dashed #e5e7eb;
+  border-radius: 6px;
 }
 
 .ehz-footer {
@@ -230,13 +318,4 @@ body,
   padding: 1px 4px;
   border-radius: 3px;
   font-size: 11px;
-}
-
-.ehz-empty {
-  padding: 24px;
-  text-align: center;
-  color: #6b7280;
-  background: #f9fafb;
-  border: 1px dashed #e5e7eb;
-  border-radius: 6px;
 }

@@ -1,16 +1,17 @@
 /**
- * Core algorithm — stop detection, engine hours interpolation, zone clustering.
+ * Core algorithm — stop detection, engine hours interpolation, zone clustering,
+ * trip + stop segment construction, day bucketing.
  *
- * Pure functions, no React or API dependencies. Easy to unit test in isolation
- * (when we add tests later).
+ * Pure functions, no React or API dependencies. Easy to unit test.
  */
 
 import type {
   Cluster,
+  DayBucket,
   GeotabStatusData,
   GeotabTrip,
+  Segment,
   Stop,
-  TimelineEvent,
 } from "../types";
 
 /** 1 mile expressed in meters — used as the default cluster radius. */
@@ -80,7 +81,7 @@ export function interpolateEngineHours(
 /**
  * For each pair of consecutive trips, the stop period runs from
  * `trip.stop` → `trip.nextTripStart`. Build a list of stops with
- * engine-hour deltas across each window.
+ * entry/exit engine-hour readings and the delta.
  *
  * Trips without a `stopPoint` or without `nextTripStart` (open-ended,
  * usually the last trip in the range) are skipped.
@@ -95,10 +96,10 @@ export function buildStops(
     const sp = trip.stopPoint;
     if (!sp || sp.x == null || sp.y == null) continue;
     if (!trip.nextTripStart) continue;
-    const ehStart = interpolateEngineHours(engineHours, trip.stop);
-    const ehEnd = interpolateEngineHours(engineHours, trip.nextTripStart);
+    const entry = interpolateEngineHours(engineHours, trip.stop);
+    const exit = interpolateEngineHours(engineHours, trip.nextTripStart);
     const accumulated =
-      ehStart != null && ehEnd != null ? Math.max(0, ehEnd - ehStart) : null;
+      entry != null && exit != null ? Math.max(0, exit - entry) : null;
     stops.push({
       lat: sp.y,
       lng: sp.x,
@@ -106,6 +107,8 @@ export function buildStops(
       depart: trip.nextTripStart,
       durationMs:
         new Date(trip.nextTripStart).getTime() - new Date(trip.stop).getTime(),
+      entryEngineSeconds: entry,
+      exitEngineSeconds: exit,
       engineSecondsAccumulated: accumulated,
       tripIndex: i,
     });
@@ -155,7 +158,6 @@ export function clusterStops(
       });
     }
   }
-  // Populate totals once clustering is settled.
   for (const c of clusters) {
     let totalEh = 0;
     let totalDur = 0;
@@ -171,44 +173,96 @@ export function clusterStops(
 }
 
 /**
- * Weave trips (transit events) and stops (zone events) into a chronological
- * timeline keyed by tripIndex. Used by the Timeline component to render the
- * day-by-day "Zone A → Transit → Zone B" view.
+ * Interleave trips and stops into a chronological segment list.
+ * Each trip becomes a TripSegment with entry/exit engine hours interpolated
+ * at trip.start and trip.stop. Each tripIndex's stop (when present in a
+ * cluster) becomes a StopSegment carrying the cluster's id + address.
+ *
+ * Call this AFTER clusters have been geocoded so addresses are populated.
  */
-export function buildTimeline(
+export function buildSegments(
   trips: GeotabTrip[],
+  engineHours: GeotabStatusData[],
   clusters: Cluster[]
-): TimelineEvent[] {
+): Segment[] {
   const stopToCluster = new Map<number, Cluster>();
   for (const c of clusters) {
     for (const s of c.stops) stopToCluster.set(s.tripIndex, c);
   }
-  const events: TimelineEvent[] = [];
+
+  const segments: Segment[] = [];
   for (let i = 0; i < trips.length; i++) {
     const trip = trips[i];
-    events.push({
-      type: "transit",
+    const entry = interpolateEngineHours(engineHours, trip.start);
+    const exit = interpolateEngineHours(engineHours, trip.stop);
+    const acc =
+      entry != null && exit != null ? Math.max(0, exit - entry) : null;
+    segments.push({
+      type: "trip",
       start: trip.start,
       end: trip.stop,
-      distanceKm: trip.distance ?? 0,
       durationMs:
         new Date(trip.stop).getTime() - new Date(trip.start).getTime(),
+      distanceKm: trip.distance ?? 0,
+      entryEngineSeconds: entry,
+      exitEngineSeconds: exit,
+      accumulatedEngineSeconds: acc,
     });
+
     const cluster = stopToCluster.get(i);
     if (cluster) {
       const stop = cluster.stops.find((s) => s.tripIndex === i);
       if (stop) {
-        events.push({
-          type: "zone",
-          cluster,
-          stop,
+        segments.push({
+          type: "stop",
           start: stop.arrive,
           end: stop.depart,
           durationMs: stop.durationMs,
-          engineSeconds: stop.engineSecondsAccumulated,
+          clusterId: cluster.id,
+          address: cluster.address,
+          lat: stop.lat,
+          lng: stop.lng,
+          entryEngineSeconds: stop.entryEngineSeconds,
+          exitEngineSeconds: stop.exitEngineSeconds,
+          accumulatedEngineSeconds: stop.engineSecondsAccumulated,
         });
       }
     }
   }
-  return events;
+  return segments;
+}
+
+/** Group segments by local-time day. Returns days sorted ascending. */
+export function bucketByDay(segments: Segment[]): DayBucket[] {
+  const map = new Map<string, DayBucket>();
+  for (const seg of segments) {
+    const d = new Date(seg.start);
+    // Local-time YYYY-MM-DD so day boundaries match the user's timezone.
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, "0");
+    const day = String(d.getDate()).padStart(2, "0");
+    const key = `${y}-${m}-${day}`;
+    let bucket = map.get(key);
+    if (!bucket) {
+      bucket = {
+        day: key,
+        dayLabel: d.toLocaleDateString(undefined, {
+          weekday: "long",
+          year: "numeric",
+          month: "short",
+          day: "numeric",
+        }),
+        segments: [],
+        stopEngineSeconds: 0,
+        tripEngineSeconds: 0,
+      };
+      map.set(key, bucket);
+    }
+    bucket.segments.push(seg);
+    if (seg.accumulatedEngineSeconds != null) {
+      if (seg.type === "stop") bucket.stopEngineSeconds += seg.accumulatedEngineSeconds;
+      else bucket.tripEngineSeconds += seg.accumulatedEngineSeconds;
+    }
+  }
+  return Array.from(map.values()).sort((a, b) => a.day.localeCompare(b.day));
 }

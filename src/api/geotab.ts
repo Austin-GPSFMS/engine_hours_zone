@@ -1,15 +1,16 @@
 /**
  * Promise-based wrappers around the MyGeotab Add-In `api.call` interface.
  *
- * Same shape as the Advanced Report Builder's api/geotab.ts: every call goes
- * through `apiCall<T>` so we have a single place to pace requests and surface
- * typed errors.
+ * Mirrors the shape of advanced_report_builder/src/api/geotab.ts: every call
+ * goes through `apiCall<T>` so we have a single place to pace requests and
+ * surface typed errors.
  */
 
 import type {
   GeotabApi,
   GeotabAddress,
   GeotabDevice,
+  GeotabGroup,
   GeotabStatusData,
   GeotabTrip,
 } from "../types";
@@ -56,22 +57,55 @@ export function friendlyError(err: unknown): string {
   return String(err);
 }
 
-/** Fetch active devices, sorted by name, with the synthetic NoDeviceId removed. */
-export async function fetchDevices(api: GeotabApi): Promise<GeotabDevice[]> {
-  const devices = await apiCall<GeotabDevice[]>(api, "Get", {
-    typeName: "Device",
+/** Fetch the full Group list keyed by id. */
+export async function fetchGroups(
+  api: GeotabApi
+): Promise<Map<string, GeotabGroup>> {
+  const groups = await apiCall<GeotabGroup[]>(api, "Get", {
+    typeName: "Group",
     resultsLimit: 5000,
   });
-  return devices
-    .filter((d) => d.id !== "NoDeviceId")
-    .sort((a, b) => (a.name ?? "").localeCompare(b.name ?? ""));
+  return new Map(groups.map((g) => [g.id, g]));
 }
 
 /**
- * Fetch trips and engine-hours StatusData for a device over a date range.
+ * Fetch devices scoped to a set of groups. When `groupIds` is empty we
+ * default to GroupCompanyId, which returns the full fleet.
  *
- * The StatusData window is padded by ±1 hour so we can interpolate cleanly
- * at the edges of the report window. Both arrays come back time-sorted.
+ * Archived devices (activeTo in the past) are excluded unless explicitly
+ * requested. Sort order: name ascending.
+ */
+export async function fetchDevices(
+  api: GeotabApi,
+  groupIds: string[] = [],
+  includeArchived: boolean = false
+): Promise<GeotabDevice[]> {
+  const search =
+    groupIds.length > 0
+      ? { groups: groupIds.map((id) => ({ id })) }
+      : { groups: [{ id: "GroupCompanyId" }] };
+  const devices = await apiCall<GeotabDevice[]>(api, "Get", {
+    typeName: "Device",
+    search,
+    resultsLimit: 50000,
+  });
+  const filtered = includeArchived
+    ? devices
+    : devices.filter((d) => {
+        if (d.id === "NoDeviceId") return false;
+        if (!d.activeTo) return true;
+        const t = new Date(d.activeTo).getTime();
+        return isNaN(t) ? true : t > Date.now();
+      });
+  return filtered.sort((a, b) =>
+    (a.name ?? "").localeCompare(b.name ?? "")
+  );
+}
+
+/**
+ * Fetch trips and engine-hours StatusData for a single device over a date
+ * range. The StatusData window is padded by ±1 hour so we can interpolate
+ * cleanly at the edges. Both arrays come back time-sorted.
  */
 export async function fetchTripsAndEngineHours(
   api: GeotabApi,
