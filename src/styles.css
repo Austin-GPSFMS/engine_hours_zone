@@ -296,6 +296,18 @@ body,
   text-decoration: underline;
 }
 
+.ehz-tl-from-to {
+  font-size: 12px;
+  color: #4b5563;
+  margin-top: 2px;
+}
+
+.ehz-tl-label {
+  font-weight: 600;
+  color: #6b7280;
+  margin-right: 4px;
+}
+
 .ehz-empty {
   padding: 24px;
   text-align: center;

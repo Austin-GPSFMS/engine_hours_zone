@@ -197,6 +197,10 @@ export function buildSegments(
     const exit = interpolateEngineHours(engineHours, trip.stop);
     const acc =
       entry != null && exit != null ? Math.max(0, exit - entry) : null;
+    // Trip[i] is preceded by the stop with tripIndex = i-1 and followed by
+    // the stop with tripIndex = i (since each stop sits AFTER its trip).
+    const fromCluster = stopToCluster.get(i - 1);
+    const toCluster = stopToCluster.get(i);
     segments.push({
       type: "trip",
       start: trip.start,
@@ -204,6 +208,10 @@ export function buildSegments(
       durationMs:
         new Date(trip.stop).getTime() - new Date(trip.start).getTime(),
       distanceKm: trip.distance ?? 0,
+      fromZoneId: fromCluster?.id ?? null,
+      fromAddress: fromCluster?.address ?? null,
+      toZoneId: toCluster?.id ?? null,
+      toAddress: toCluster?.address ?? null,
       entryEngineSeconds: entry,
       exitEngineSeconds: exit,
       accumulatedEngineSeconds: acc,

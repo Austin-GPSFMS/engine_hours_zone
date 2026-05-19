@@ -125,13 +125,38 @@ function SegmentRow({ segment }: { segment: Segment }) {
   const delta = secondsToHours(segment.accumulatedEngineSeconds);
 
   if (segment.type === "trip") {
+    const from =
+      segment.fromZoneId != null
+        ? `${segment.fromZoneId} · ${segment.fromAddress ?? ""}`
+        : null;
+    const to =
+      segment.toZoneId != null
+        ? `${segment.toZoneId} · ${segment.toAddress ?? ""}`
+        : null;
     return (
       <tr className="ehz-row-trip">
         <td>{time}</td>
         <td>
           <span className="ehz-pill ehz-pill-trip">Trip</span>
         </td>
-        <td>{kmToMiles(segment.distanceKm)} mi</td>
+        <td>
+          <div>{kmToMiles(segment.distanceKm)} mi</div>
+          {(from || to) && (
+            <div className="ehz-tl-from-to">
+              {from && (
+                <>
+                  <span className="ehz-tl-label">From:</span> {from}
+                </>
+              )}
+              {from && to && <span style={{ margin: "0 6px" }}>→</span>}
+              {to && (
+                <>
+                  <span className="ehz-tl-label">To:</span> {to}
+                </>
+              )}
+            </div>
+          )}
+        </td>
         <td>{duration}</td>
         <td className="ehz-num">{entry}</td>
         <td className="ehz-num">{exit}</td>

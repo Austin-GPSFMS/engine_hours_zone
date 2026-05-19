@@ -110,6 +110,12 @@ export interface TripSegment {
   end: string;
   durationMs: number;
   distanceKm: number;
+  /** Zone the vehicle departed from — the previous stop's cluster. */
+  fromZoneId: string | null;
+  fromAddress: string | null;
+  /** Zone the vehicle arrived at — the next stop's cluster. */
+  toZoneId: string | null;
+  toAddress: string | null;
   entryEngineSeconds: number | null;
   exitEngineSeconds: number | null;
   accumulatedEngineSeconds: number | null;
