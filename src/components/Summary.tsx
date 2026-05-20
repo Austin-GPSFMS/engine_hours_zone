@@ -1,13 +1,15 @@
 import type { MultiVehicleReport } from "../types";
+import { METRIC_LABEL } from "../types";
 import { formatDateTime, secondsToHours } from "../utils/format";
 
 /**
- * Top KPI strip — rolls up across all selected vehicles. Surfaces both the
- * stop engine hours (the headline "where did the hours accumulate" number)
- * and the trip engine hours (drive time) so they're easy to compare.
+ * Top KPI strip — rolls up across all selected vehicles. Surfaces stop hours
+ * (the headline "where the time accumulated" number) and trip hours (drive
+ * time), labeled with the active metric (Ignition vs Engine Hours).
  */
 export function Summary({ report }: { report: MultiVehicleReport }) {
   const failures = report.vehicles.filter((v) => v.error).length;
+  const metricLabel = METRIC_LABEL[report.metric];
   return (
     <div className="ehz-summary">
       <h3>Summary</h3>
@@ -17,6 +19,10 @@ export function Summary({ report }: { report: MultiVehicleReport }) {
           <span className="ehz-summary-value">
             {formatDateTime(report.fromDate)} – {formatDateTime(report.toDate)}
           </span>
+        </div>
+        <div>
+          <span className="ehz-summary-label">Metric</span>
+          <span className="ehz-summary-value">{metricLabel}</span>
         </div>
         <div>
           <span className="ehz-summary-label">Vehicles</span>
@@ -30,19 +36,23 @@ export function Summary({ report }: { report: MultiVehicleReport }) {
           </span>
         </div>
         <div>
+          <span className="ehz-summary-label">Distinct zones</span>
+          <span className="ehz-summary-value">{report.zones.length}</span>
+        </div>
+        <div>
           <span className="ehz-summary-label">Total segments</span>
           <span className="ehz-summary-value">{report.totals.totalSegments}</span>
         </div>
         <div>
-          <span className="ehz-summary-label">Stop engine hours</span>
+          <span className="ehz-summary-label">Stop hours</span>
           <span className="ehz-summary-value">
-            {secondsToHours(report.totals.totalStopEngineSeconds)} hrs
+            {secondsToHours(report.totals.totalStopSeconds)} hrs
           </span>
         </div>
         <div>
-          <span className="ehz-summary-label">Trip engine hours</span>
+          <span className="ehz-summary-label">Trip hours</span>
           <span className="ehz-summary-value">
-            {secondsToHours(report.totals.totalTripEngineSeconds)} hrs
+            {secondsToHours(report.totals.totalTripSeconds)} hrs
           </span>
         </div>
       </div>

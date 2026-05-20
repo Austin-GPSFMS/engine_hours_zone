@@ -14,6 +14,7 @@ import type {
   GeotabSessionInfo,
   GeotabStatusData,
   GeotabTrip,
+  Metric,
 } from "../types";
 
 /** Small spacing between back-to-back calls (rate-limit politeness). */
@@ -21,6 +22,15 @@ const INTER_CALL_DELAY_MS = 50;
 
 /** The calibrated cumulative engine hours diagnostic — matches MyGeotab's UI. */
 export const ENGINE_HOURS_DIAGNOSTIC_ID = "DiagnosticEngineHoursAdjustmentId";
+/** Ignition state diagnostic — 1 when ignition is on, 0 when off. Available
+ *  on every device including 3-wire installs that lack engine-bus data. */
+export const IGNITION_DIAGNOSTIC_ID = "DiagnosticIgnitionId";
+
+function diagnosticIdFor(metric: Metric): string {
+  return metric === "engineHours"
+    ? ENGINE_HOURS_DIAGNOSTIC_ID
+    : IGNITION_DIAGNOSTIC_ID;
+}
 
 /** Generic typed call wrapper. Resolves with the API result, rejects on failure. */
 export function apiCall<T = unknown>(
@@ -138,21 +148,31 @@ export async function fetchDevices(
 }
 
 /**
- * Fetch trips and engine-hours StatusData for a single device over a date
- * range. The StatusData window is padded by ±1 hour so we can interpolate
- * cleanly at the edges. Both arrays come back time-sorted.
+ * Fetch trips and the chosen metric's StatusData for a single device.
+ *
+ * Pad varies by metric:
+ *  - engineHours: ±1 hour is plenty, the counter changes smoothly.
+ *  - ignition:    needs more padding (~24h) so the integration can
+ *                 establish the initial on/off state from the prior event.
+ *                 Without a prior reading we don't know if the very first
+ *                 sample is the "first" event or just a heartbeat.
+ *
+ * Both arrays come back time-sorted.
  */
-export async function fetchTripsAndEngineHours(
+export async function fetchTripsAndStatus(
   api: GeotabApi,
   deviceId: string,
   fromDate: string,
-  toDate: string
-): Promise<{ trips: GeotabTrip[]; engineHours: GeotabStatusData[] }> {
-  const pad = 60 * 60 * 1000;
-  const statusFrom = new Date(new Date(fromDate).getTime() - pad).toISOString();
-  const statusTo = new Date(new Date(toDate).getTime() + pad).toISOString();
+  toDate: string,
+  metric: Metric
+): Promise<{ trips: GeotabTrip[]; statusData: GeotabStatusData[] }> {
+  const padMs = metric === "ignition" ? 24 * 60 * 60 * 1000 : 60 * 60 * 1000;
+  const statusFrom = new Date(
+    new Date(fromDate).getTime() - padMs
+  ).toISOString();
+  const statusTo = new Date(new Date(toDate).getTime() + padMs).toISOString();
 
-  const [trips, engineHours] = await Promise.all([
+  const [trips, statusData] = await Promise.all([
     apiCall<GeotabTrip[]>(api, "Get", {
       typeName: "Trip",
       search: {
@@ -166,7 +186,7 @@ export async function fetchTripsAndEngineHours(
       typeName: "StatusData",
       search: {
         deviceSearch: { id: deviceId },
-        diagnosticSearch: { id: ENGINE_HOURS_DIAGNOSTIC_ID },
+        diagnosticSearch: { id: diagnosticIdFor(metric) },
         fromDate: statusFrom,
         toDate: statusTo,
       },
@@ -178,7 +198,7 @@ export async function fetchTripsAndEngineHours(
     trips: trips
       .slice()
       .sort((a, b) => new Date(a.start).getTime() - new Date(b.start).getTime()),
-    engineHours: engineHours
+    statusData: statusData
       .slice()
       .sort(
         (a, b) => new Date(a.dateTime).getTime() - new Date(b.dateTime).getTime()

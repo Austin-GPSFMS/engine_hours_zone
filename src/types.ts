@@ -71,11 +71,20 @@ export interface GeotabTrip {
   distance?: number;
 }
 
-/** Subset of StatusData fields we use. */
+/**
+ * Subset of StatusData fields we use.
+ *
+ * `id` is null on synthetic interpolated samples that Geotab returns when
+ * the query asks for interpolation. We use it to distinguish reported vs.
+ * synthesized values in the engine-hours mode if we ever opt into that.
+ */
 export interface GeotabStatusData {
-  id?: string;
+  id?: string | null;
   dateTime: string;
-  /** For DiagnosticEngineHoursAdjustmentId this is cumulative engine seconds. */
+  /**
+   * For DiagnosticEngineHoursAdjustmentId this is cumulative engine seconds.
+   * For DiagnosticIgnitionId this is the ignition STATE — 1 (on) or 0 (off).
+   */
   data: number;
 }
 
@@ -85,22 +94,42 @@ export interface GeotabAddress {
 }
 
 /**
+ * Which underlying signal we're using to measure operating time.
+ *
+ * - `ignition` — DiagnosticIgnitionId, integrated across on/off events.
+ *                Works on every device including 3-wire GO Rugged installs
+ *                that don't read the engine bus. This is the default.
+ * - `engineHours` — DiagnosticEngineHoursAdjustmentId, the calibrated
+ *                   cumulative value MyGeotab's UI uses. Requires the engine
+ *                   bus to be wired (J1939 / J1708).
+ */
+export type Metric = "ignition" | "engineHours";
+
+export const METRIC_LABEL: Record<Metric, string> = {
+  ignition: "Ignition Time",
+  engineHours: "Engine Hours",
+};
+
+/**
  * A single stop period (gap between two consecutive trips) on a device.
- * Carries both the entry and exit cumulative engine-hours readings so we
- * can show "200.45 → 203.55" alongside the delta.
+ * Carries both the entry and exit cumulative metric readings so we can
+ * show "200.45 → 203.55" alongside the delta.
  */
 export interface Stop {
+  /** Owner device — tags the stop so we can pool stops globally for
+   *  cross-vehicle clustering while still computing per-vehicle stats. */
+  deviceId: string;
   lat: number;
   lng: number;
   arrive: string;
   depart: string;
   durationMs: number;
-  /** Cumulative engine seconds at arrive time (interpolated). */
-  entryEngineSeconds: number | null;
-  /** Cumulative engine seconds at depart time (interpolated). */
-  exitEngineSeconds: number | null;
+  /** Cumulative metric seconds at arrive time. */
+  entrySeconds: number | null;
+  /** Cumulative metric seconds at depart time. */
+  exitSeconds: number | null;
   /** exit - entry, clamped at 0. */
-  engineSecondsAccumulated: number | null;
+  accumulatedSeconds: number | null;
   tripIndex: number;
 }
 
@@ -111,94 +140,98 @@ export interface Cluster {
   centerLng: number;
   stops: Stop[];
   address: string | null;
-  totalEngineSeconds: number;
+  /** Global totals — sum across all vehicles that visited this zone. */
+  totalSeconds: number;
   totalStoppedMs: number;
   visits: number;
+  /** Unique device IDs of vehicles that have a stop in this cluster. */
+  vehicleIds: Set<string>;
 }
 
 // -----------------------------------------------------------------------
-// Trip-level segment model — the primary view post-v1.1
+// Segments — trip + stop chronology built off the global clusters
 // -----------------------------------------------------------------------
 
-/** A driving segment between two trip endpoints. */
 export interface TripSegment {
   type: "trip";
   start: string;
   end: string;
   durationMs: number;
   distanceKm: number;
-  /** Zone the vehicle departed from — the previous stop's cluster. */
+  /** Zone the vehicle departed from. */
   fromZoneId: string | null;
   fromAddress: string | null;
   fromLat: number | null;
   fromLng: number | null;
-  /** Zone the vehicle arrived at — the next stop's cluster. */
+  /** Zone the vehicle arrived at. */
   toZoneId: string | null;
   toAddress: string | null;
   toLat: number | null;
   toLng: number | null;
-  entryEngineSeconds: number | null;
-  exitEngineSeconds: number | null;
-  accumulatedEngineSeconds: number | null;
+  entrySeconds: number | null;
+  exitSeconds: number | null;
+  accumulatedSeconds: number | null;
 }
 
-/** A stop segment — the vehicle is parked at a zone for a period of time. */
 export interface StopSegment {
   type: "stop";
   start: string;
   end: string;
   durationMs: number;
-  /** Cluster ID this stop falls into (Z1, Z2, …). */
   clusterId: string;
-  /** Reverse-geocoded address, or null if geocode failed. */
   address: string | null;
   lat: number;
   lng: number;
-  entryEngineSeconds: number | null;
-  exitEngineSeconds: number | null;
-  accumulatedEngineSeconds: number | null;
+  entrySeconds: number | null;
+  exitSeconds: number | null;
+  accumulatedSeconds: number | null;
 }
 
 export type Segment = TripSegment | StopSegment;
 
 export interface DayBucket {
-  /** ISO date "2026-05-17" used as map key + sort key. */
   day: string;
-  /** Human-readable label, e.g. "Sunday, May 17, 2026". */
   dayLabel: string;
   segments: Segment[];
-  /** Sum of accumulated engine seconds across stop segments on this day. */
-  stopEngineSeconds: number;
-  /** Sum of accumulated engine seconds across trip segments on this day. */
-  tripEngineSeconds: number;
+  stopSeconds: number;
+  tripSeconds: number;
+}
+
+/** Per-vehicle stats AT a specific global zone. */
+export interface VehicleZoneStats {
+  /** Reference to the global cluster. */
+  zone: Cluster;
+  visits: number;
+  totalSeconds: number;
+  totalStoppedMs: number;
 }
 
 export interface VehicleBucket {
   deviceId: string;
   deviceName: string;
   days: DayBucket[];
-  clusters: Cluster[];
-  /** Total stop engine seconds across all days (= sum of cluster totals). */
-  totalStopEngineSeconds: number;
-  /** Total trip engine seconds across all days. */
-  totalTripEngineSeconds: number;
+  /** Subset of report.zones this vehicle visited, with per-vehicle stats. */
+  zones: VehicleZoneStats[];
+  totalStopSeconds: number;
+  totalTripSeconds: number;
   totalStops: number;
   totalTrips: number;
-  /** If this vehicle failed entirely, the error message; otherwise undefined. */
   error?: string;
 }
 
 export interface MultiVehicleReport {
   fromDate: string;
   toDate: string;
-  /** Cluster radius (m) used to generate this report. */
   radiusMeters: number;
+  metric: Metric;
+  /** Global zones (shared zone IDs across all vehicles). */
+  zones: Cluster[];
   vehicles: VehicleBucket[];
   totals: {
     vehicleCount: number;
     successfulVehicleCount: number;
     totalSegments: number;
-    totalStopEngineSeconds: number;
-    totalTripEngineSeconds: number;
+    totalStopSeconds: number;
+    totalTripSeconds: number;
   };
 }

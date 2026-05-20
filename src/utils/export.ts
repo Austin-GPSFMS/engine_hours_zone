@@ -1,16 +1,16 @@
 /**
- * ExcelJS xlsx export — multi-vehicle, trip-level breakdown.
+ * ExcelJS xlsx export — multi-vehicle, trip-level breakdown with global zones.
  *
- *   Sheet 1: "Segments" — primary data sheet, header includes:
- *              - GPSFMS logo (top-left)
- *              - Title, period, timezone, cluster radius, generation time
- *              - Then the flat segment table with auto-filter + frozen
- *                header & vehicle column. Origin/Destination cells combine
- *                "Zx: address" for easy scanning, the rightmost Map cell
- *                opens the location in Google Maps.
- *   Sheet 2: "Zones"    — per-vehicle zone roll-up
- *   Sheet 3: "Report Metadata" — full provenance block
- *   Sheet 4: "Failed Vehicles" — only added if any vehicles errored out
+ *   Sheet 1: "Segments"     — primary chronological view per vehicle/day
+ *                             with logo + metadata header + Origin/Destination
+ *                             + Map hyperlink into MyGeotab.
+ *   Sheet 2: "Zone Summary" — global per-zone roll-up across ALL vehicles
+ *                             (pivot-ready: each zone gets one row with total
+ *                             visits, hours, vehicle count).
+ *   Sheet 3: "Vehicle Zones" — per-vehicle × per-zone breakdown, also pivot-
+ *                              friendly when filtering one vehicle at a time.
+ *   Sheet 4: "Report Metadata" — full provenance block.
+ *   Sheet 5: "Failed Vehicles" — only emitted when any errors occurred.
  *
  * Brand color: GPSFMS navy `#25477B`.
  */
@@ -18,10 +18,12 @@
 import ExcelJS from "exceljs";
 import logoUrl from "../assets/gpsfms-logo.png";
 import type {
+  Cluster,
   GeotabSessionInfo,
   MultiVehicleReport,
   VehicleBucket,
 } from "../types";
+import { METRIC_LABEL } from "../types";
 import { formatDateTime, KM_PER_MILE } from "./format";
 import { mapUrlForPoint } from "./mapUrl";
 
@@ -72,7 +74,6 @@ function kmToMi(km: number | null | undefined): number | null {
   return km == null ? null : Number((km / KM_PER_MILE).toFixed(2));
 }
 
-/** "Z1: 3908 Veterans Pkwy, Garner, NC" — empty string when both pieces are missing. */
 function formatLocation(
   zoneId: string | null | undefined,
   address: string | null | undefined
@@ -83,13 +84,11 @@ function formatLocation(
   return z || a;
 }
 
-/** Fetch the bundled logo asset as raw bytes for embedding in the workbook. */
 async function loadLogoBytes(): Promise<ArrayBuffer> {
   const res = await fetch(logoUrl);
   return res.arrayBuffer();
 }
 
-/** Resolve the user's local IANA timezone (e.g. "America/New_York"). */
 function userTimeZone(): string {
   try {
     return Intl.DateTimeFormat().resolvedOptions().timeZone || "(unknown)";
@@ -115,7 +114,8 @@ export async function exportToXlsx(
   }
 
   await writeSegmentsSheet(wb, report, logoImageId, session);
-  writeZonesSheet(wb, report, session);
+  writeZoneSummarySheet(wb, report, session);
+  writeVehicleZonesSheet(wb, report, session);
   writeMetadataSheet(wb, report, session);
   writeFailuresSheet(wb, report);
 
@@ -135,7 +135,7 @@ export async function exportToXlsx(
 }
 
 // ----------------------------------------------------------------------
-// Segments sheet — the primary view
+// Sheet 1: Segments — primary chronological view
 // ----------------------------------------------------------------------
 
 const SEGMENT_HEADERS = [
@@ -149,29 +149,13 @@ const SEGMENT_HEADERS = [
   "Distance (mi)",
   "Origin",
   "Destination",
-  "Entry EH (hrs)",
-  "Exit EH (hrs)",
-  "Δ EH (hrs)",
+  "Entry (hrs)",
+  "Exit (hrs)",
+  "Δ (hrs)",
   "Map",
 ];
 
-const SEGMENT_COL_WIDTHS = [
-  22, // Vehicle
-  12, // Date
-  22, // Day
-  10, // Type
-  20, // Start
-  20, // End
-  14, // Duration
-  14, // Distance
-  50, // Origin
-  50, // Destination
-  14, // Entry EH
-  14, // Exit EH
-  12, // Δ EH
-  14, // Map
-];
-
+const SEGMENT_COL_WIDTHS = [22, 12, 22, 10, 20, 20, 14, 14, 50, 50, 14, 14, 12, 14];
 const SEGMENTS_HEADER_ROW = 8;
 
 async function writeSegmentsSheet(
@@ -184,22 +168,16 @@ async function writeSegmentsSheet(
     views: [{ state: "frozen", ySplit: SEGMENTS_HEADER_ROW, xSplit: 1 }],
   });
 
-  // Column widths
   SEGMENT_COL_WIDTHS.forEach((w, i) => {
     seg.getColumn(i + 1).width = w;
   });
-
-  // Origin / Destination columns wrap their text so the full address stays
-  // visible without manually resizing.
   seg.getColumn(9).alignment = { wrapText: true, vertical: "top" };
   seg.getColumn(10).alignment = { wrapText: true, vertical: "top" };
 
-  // Reserve some height for the logo / metadata area
   for (let r = 1; r <= SEGMENTS_HEADER_ROW - 1; r++) {
     seg.getRow(r).height = 22;
   }
 
-  // Logo
   if (logoImageId != null) {
     seg.addImage(logoImageId, {
       tl: { col: 0.2, row: 0.2 },
@@ -207,20 +185,19 @@ async function writeSegmentsSheet(
     });
   }
 
-  // Title in column C row 1
   seg.mergeCells("C1:F1");
   const titleCell = seg.getCell("C1");
   titleCell.value = "Engine Hours by Zone";
   titleCell.font = TITLE_FONT;
   titleCell.alignment = { vertical: "middle" };
 
-  // Metadata block in rows 3-6, columns C:F
   const metaRows: Array<[string, string | number]> = [
     [
       "Period:",
       `${formatDateTime(report.fromDate)} — ${formatDateTime(report.toDate)}`,
     ],
     ["Time Zone:", userTimeZone()],
+    ["Metric:", METRIC_LABEL[report.metric]],
     [
       "Database:",
       session?.database
@@ -239,20 +216,20 @@ async function writeSegmentsSheet(
     seg.getCell(`D${r}`).value = value;
   });
 
-  // Roll-up totals on the right (cols H-J rows 3-6)
   const totalsRows: Array<[string, string | number]> = [
     [
       "Vehicles:",
       `${report.totals.successfulVehicleCount} of ${report.totals.vehicleCount}`,
     ],
+    ["Distinct zones:", report.zones.length],
     ["Total segments:", report.totals.totalSegments],
     [
-      "Stop engine hours:",
-      `${(report.totals.totalStopEngineSeconds / 3600).toFixed(2)} hrs`,
+      "Stop hours:",
+      `${(report.totals.totalStopSeconds / 3600).toFixed(2)} hrs`,
     ],
     [
-      "Trip engine hours:",
-      `${(report.totals.totalTripEngineSeconds / 3600).toFixed(2)} hrs`,
+      "Trip hours:",
+      `${(report.totals.totalTripSeconds / 3600).toFixed(2)} hrs`,
     ],
   ];
   totalsRows.forEach(([label, value], i) => {
@@ -263,7 +240,6 @@ async function writeSegmentsSheet(
     seg.getCell(`I${r}`).value = value;
   });
 
-  // Column header row
   const headerRow = seg.getRow(SEGMENTS_HEADER_ROW);
   SEGMENT_HEADERS.forEach((h, i) => {
     headerRow.getCell(i + 1).value = h;
@@ -271,7 +247,6 @@ async function writeSegmentsSheet(
   styleHeaderRow(headerRow);
   headerRow.height = 18;
 
-  // Data rows
   let rowIdx = SEGMENTS_HEADER_ROW + 1;
   let zebra = false;
   for (const v of report.vehicles) {
@@ -288,12 +263,8 @@ async function writeSegmentsSheet(
         if (s.type === "trip") {
           origin = formatLocation(s.fromZoneId, s.fromAddress);
           destination = formatLocation(s.toZoneId, s.toAddress);
-          // Map link points to the destination so the user can see where
-          // this trip ended up.
           url = mapUrlForPoint(session, s.toLat, s.toLng, s.toAddress);
         } else {
-          // Stops sit at a single location — fill both columns the same
-          // way so filters like "Origin = Z1" still surface the stop.
           const loc = formatLocation(s.clusterId, s.address);
           origin = loc;
           destination = loc;
@@ -311,9 +282,9 @@ async function writeSegmentsSheet(
           s.type === "trip" ? kmToMi(s.distanceKm) : null;
         r.getCell(9).value = origin;
         r.getCell(10).value = destination;
-        r.getCell(11).value = secToHours(s.entryEngineSeconds);
-        r.getCell(12).value = secToHours(s.exitEngineSeconds);
-        r.getCell(13).value = secToHours(s.accumulatedEngineSeconds);
+        r.getCell(11).value = secToHours(s.entrySeconds);
+        r.getCell(12).value = secToHours(s.exitSeconds);
+        r.getCell(13).value = secToHours(s.accumulatedSeconds);
 
         if (url) {
           const mapCell = r.getCell(14);
@@ -321,7 +292,6 @@ async function writeSegmentsSheet(
           mapCell.font = LINK_FONT;
         }
 
-        // Subtle zebra striping for readability.
         if (zebra) {
           for (let c = 1; c <= SEGMENT_HEADERS.length; c++) {
             const cell = r.getCell(c);
@@ -339,47 +309,101 @@ async function writeSegmentsSheet(
 }
 
 // ----------------------------------------------------------------------
-// Zones sheet
+// Sheet 2: Zone Summary — global per-zone roll-up (pivot-ready)
 // ----------------------------------------------------------------------
 
-function writeZonesSheet(
+function writeZoneSummarySheet(
   wb: ExcelJS.Workbook,
   report: MultiVehicleReport,
   session: GeotabSessionInfo | null
 ) {
-  const zones = wb.addWorksheet("Zones");
-  zones.columns = [
+  const ws = wb.addWorksheet("Zone Summary");
+  ws.columns = [
+    { header: "Zone", key: "zone", width: 8 },
+    { header: "Address", key: "address", width: 45 },
+    { header: "Latitude", key: "lat", width: 12 },
+    { header: "Longitude", key: "lng", width: 12 },
+    { header: "Vehicles", key: "vehicles", width: 10 },
+    { header: "Total Visits", key: "visits", width: 12 },
+    { header: "Total Stopped (hrs)", key: "stopped", width: 18 },
+    { header: "Total Hours Accumulated", key: "hours", width: 22 },
+    { header: "Map", key: "map", width: 14 },
+  ];
+  styleHeaderRow(ws.getRow(1));
+  ws.autoFilter = { from: { row: 1, column: 1 }, to: { row: 1, column: 9 } };
+  ws.views = [{ state: "frozen", ySplit: 1 }];
+
+  // Sort by total hours descending so the heaviest zones bubble to the top.
+  const sorted: Cluster[] = report.zones
+    .slice()
+    .sort((a, b) => b.totalSeconds - a.totalSeconds);
+
+  let rowIdx = 2;
+  for (const c of sorted) {
+    const row = ws.getRow(rowIdx++);
+    row.getCell(1).value = c.id;
+    row.getCell(2).value = c.address ?? "";
+    row.getCell(3).value = Number(c.centerLat.toFixed(6));
+    row.getCell(4).value = Number(c.centerLng.toFixed(6));
+    row.getCell(5).value = c.vehicleIds.size;
+    row.getCell(6).value = c.visits;
+    row.getCell(7).value = msToHours(c.totalStoppedMs);
+    row.getCell(8).value = secToHours(c.totalSeconds);
+    const url = mapUrlForPoint(session, c.centerLat, c.centerLng, c.address);
+    if (url) {
+      row.getCell(9).value = { text: "Open in Maps", hyperlink: url };
+      row.getCell(9).font = LINK_FONT;
+    }
+  }
+}
+
+// ----------------------------------------------------------------------
+// Sheet 3: Vehicle × Zone breakdown
+// ----------------------------------------------------------------------
+
+function writeVehicleZonesSheet(
+  wb: ExcelJS.Workbook,
+  report: MultiVehicleReport,
+  session: GeotabSessionInfo | null
+) {
+  const ws = wb.addWorksheet("Vehicle Zones");
+  ws.columns = [
     { header: "Vehicle", key: "vehicle", width: 22 },
     { header: "Zone", key: "zone", width: 8 },
-    { header: "Address", key: "address", width: 40 },
+    { header: "Address", key: "address", width: 45 },
     { header: "Latitude", key: "lat", width: 12 },
     { header: "Longitude", key: "lng", width: 12 },
     { header: "Visits", key: "visits", width: 8 },
     { header: "Total Stopped (hrs)", key: "stopped", width: 18 },
-    { header: "Engine Hours Accumulated", key: "engineHours", width: 22 },
+    { header: "Hours Accumulated", key: "hours", width: 22 },
     { header: "Map", key: "map", width: 14 },
   ];
-  styleHeaderRow(zones.getRow(1));
-  zones.autoFilter = { from: { row: 1, column: 1 }, to: { row: 1, column: 9 } };
-  zones.views = [{ state: "frozen", ySplit: 1 }];
+  styleHeaderRow(ws.getRow(1));
+  ws.autoFilter = { from: { row: 1, column: 1 }, to: { row: 1, column: 9 } };
+  ws.views = [{ state: "frozen", ySplit: 1, xSplit: 1 }];
 
   let rowIdx = 2;
   for (const v of report.vehicles) {
     if (v.error) continue;
-    const sorted = v.clusters
+    const sorted = v.zones
       .slice()
-      .sort((a, b) => b.totalEngineSeconds - a.totalEngineSeconds);
-    for (const c of sorted) {
-      const row = zones.getRow(rowIdx++);
+      .sort((a, b) => b.totalSeconds - a.totalSeconds);
+    for (const z of sorted) {
+      const row = ws.getRow(rowIdx++);
       row.getCell(1).value = v.deviceName;
-      row.getCell(2).value = c.id;
-      row.getCell(3).value = c.address ?? "";
-      row.getCell(4).value = Number(c.centerLat.toFixed(6));
-      row.getCell(5).value = Number(c.centerLng.toFixed(6));
-      row.getCell(6).value = c.visits;
-      row.getCell(7).value = msToHours(c.totalStoppedMs);
-      row.getCell(8).value = secToHours(c.totalEngineSeconds);
-      const url = mapUrlForPoint(session, c.centerLat, c.centerLng, c.address);
+      row.getCell(2).value = z.zone.id;
+      row.getCell(3).value = z.zone.address ?? "";
+      row.getCell(4).value = Number(z.zone.centerLat.toFixed(6));
+      row.getCell(5).value = Number(z.zone.centerLng.toFixed(6));
+      row.getCell(6).value = z.visits;
+      row.getCell(7).value = msToHours(z.totalStoppedMs);
+      row.getCell(8).value = secToHours(z.totalSeconds);
+      const url = mapUrlForPoint(
+        session,
+        z.zone.centerLat,
+        z.zone.centerLng,
+        z.zone.address
+      );
       if (url) {
         row.getCell(9).value = { text: "Open in Maps", hyperlink: url };
         row.getCell(9).font = LINK_FONT;
@@ -389,7 +413,7 @@ function writeZonesSheet(
 }
 
 // ----------------------------------------------------------------------
-// Metadata sheet (full provenance) — kept as-is for archival
+// Sheet 4: Metadata
 // ----------------------------------------------------------------------
 
 function writeMetadataSheet(
@@ -405,12 +429,14 @@ function writeMetadataSheet(
   styleHeaderRow(meta.getRow(1));
   meta.addRows([
     { field: "Report", value: "Engine Hours by Zone" },
+    { field: "Metric", value: METRIC_LABEL[report.metric] },
     { field: "Database", value: session?.database ?? "(unknown)" },
     { field: "Server", value: session?.server ?? "(unknown)" },
     { field: "Time Zone", value: userTimeZone() },
     { field: "From", value: formatDateTime(report.fromDate) },
     { field: "To", value: formatDateTime(report.toDate) },
     { field: "Cluster radius (m)", value: report.radiusMeters },
+    { field: "Distinct zones", value: report.zones.length },
     { field: "Vehicles selected", value: report.totals.vehicleCount },
     {
       field: "Vehicles with data",
@@ -418,19 +444,19 @@ function writeMetadataSheet(
     },
     { field: "Total segments", value: report.totals.totalSegments },
     {
-      field: "Total stop engine hours",
-      value: (report.totals.totalStopEngineSeconds / 3600).toFixed(2),
+      field: "Total stop hours",
+      value: (report.totals.totalStopSeconds / 3600).toFixed(2),
     },
     {
-      field: "Total trip engine hours",
-      value: (report.totals.totalTripEngineSeconds / 3600).toFixed(2),
+      field: "Total trip hours",
+      value: (report.totals.totalTripSeconds / 3600).toFixed(2),
     },
     { field: "Generated", value: formatDateTime(new Date()) },
   ]);
 }
 
 // ----------------------------------------------------------------------
-// Failed Vehicles (only emitted when there's content for it)
+// Sheet 5: Failed Vehicles (only emitted if there's content)
 // ----------------------------------------------------------------------
 
 function writeFailuresSheet(wb: ExcelJS.Workbook, report: MultiVehicleReport) {

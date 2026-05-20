@@ -1,7 +1,7 @@
 /**
  * Engine Hours by Zone — main app.
  *
- *   Toolbar: Group filter · Vehicle multi-select · Date range · Radius
+ *   Toolbar: Group filter · Vehicle multi-select · Date range · Radius · Metric
  *            Buttons: Run · Export
  *   Banners: standalone, errors, progress
  *   Results: Summary KPIs · One VehicleReport per selected vehicle
@@ -33,6 +33,7 @@ import type {
   GeotabGroup,
   GeotabPageState,
   GeotabSessionInfo,
+  Metric,
   MultiVehicleReport,
 } from "./types";
 import {
@@ -71,6 +72,11 @@ const radiusItems: ISelectionItem[] = [
   { id: "3218.69", name: "Radius: 2 miles" },
 ];
 
+const metricItems: ISelectionItem[] = [
+  { id: "ignition", name: "Metric: Ignition Time" },
+  { id: "engineHours", name: "Metric: Engine Hours" },
+];
+
 const ALL_VEHICLES_ID = "__ALL__";
 
 function defaultDateRange(): IDateRangeValue {
@@ -82,7 +88,7 @@ function defaultDateRange(): IDateRangeValue {
 export default function App({ api, pageState: _pageState }: AppProps) {
   const insideMyGeotab = api != null;
 
-  // ---- Session (database + server) for building MyGeotab map URLs ----
+  // ---- Session ----
   const [session, setSession] = useState<GeotabSessionInfo | null>(null);
 
   // ---- Groups & devices ----
@@ -107,6 +113,7 @@ export default function App({ api, pageState: _pageState }: AppProps) {
     defaultDateRange()
   );
   const [radiusMeters, setRadiusMeters] = useState<number>(ONE_MILE_METERS);
+  const [metric, setMetric] = useState<Metric>("ignition");
 
   // ---- Build state ----
   const [isBuilding, setIsBuilding] = useState(false);
@@ -152,7 +159,6 @@ export default function App({ api, pageState: _pageState }: AppProps) {
       .then((ds) => {
         if (cancelled) return;
         setDevices(ds);
-        // Drop any selected device IDs that fell out of the new group scope.
         setSelectedDeviceIds((prev) => {
           const inScope = new Set(ds.map((d) => d.id));
           return prev.filter((id) => id === ALL_VEHICLES_ID || inScope.has(id));
@@ -170,7 +176,6 @@ export default function App({ api, pageState: _pageState }: AppProps) {
     };
   }, [api, selectedGroupIds]);
 
-  // ---- Build vehicle picker items ----
   const deviceItems = useMemo<ISelectionItem[]>(() => {
     const all: ISelectionItem = {
       id: ALL_VEHICLES_ID,
@@ -219,6 +224,7 @@ export default function App({ api, pageState: _pageState }: AppProps) {
         fromDate: fromISO,
         toDate: toISO,
         radiusMeters,
+        metric,
         onProgress: (done, total, currentName) =>
           setProgress({ done, total, currentName }),
       });
@@ -229,7 +235,7 @@ export default function App({ api, pageState: _pageState }: AppProps) {
       setIsBuilding(false);
       setProgress(null);
     }
-  }, [api, effectiveDeviceIds, dateRange, devicesById, radiusMeters]);
+  }, [api, effectiveDeviceIds, dateRange, devicesById, radiusMeters, metric]);
 
   const onExport = useCallback(async () => {
     if (!report) return;
@@ -244,8 +250,6 @@ export default function App({ api, pageState: _pageState }: AppProps) {
   }, [report, session]);
 
   const onDevicesChange = (items: ISelectionItem[]) => {
-    // If "All" got picked, collapse the selection to just All so the chip
-    // count stays small.
     const ids = items.map((i) => String(i.id));
     if (ids.includes(ALL_VEHICLES_ID)) {
       setSelectedDeviceIds([ALL_VEHICLES_ID]);
@@ -259,6 +263,11 @@ export default function App({ api, pageState: _pageState }: AppProps) {
     if (id != null) setRadiusMeters(parseFloat(String(id)));
   };
 
+  const onMetricChange = (items: ISelectionItem[]) => {
+    const id = items[0]?.id;
+    if (id === "ignition" || id === "engineHours") setMetric(id);
+  };
+
   const onGroupsChange = useCallback((ids: string[]) => {
     setSelectedGroupIds(ids.length > 0 ? ids : ["GroupCompanyId"]);
   }, []);
@@ -270,8 +279,9 @@ export default function App({ api, pageState: _pageState }: AppProps) {
         <div>
           <h2>Engine Hours by Zone</h2>
           <p>
-            Multi-vehicle, trip-level breakdown of engine hours by location.
-            Stops within the chosen radius are clustered into a zone.
+            Multi-vehicle, trip-level breakdown of operating time by location.
+            Stops within the chosen radius are grouped into shared zones across
+            the whole fleet.
           </p>
         </div>
         <div style={{ display: "flex", gap: 8 }}>
@@ -331,6 +341,17 @@ export default function App({ api, pageState: _pageState }: AppProps) {
           withCalendar
         />
         <Dropdown
+          value={[metric]}
+          dataItems={metricItems}
+          onChange={onMetricChange}
+          errorHandler={(e) => console.error("[EHZ] Metric:", e)}
+          forceSelection
+          multiselect={false}
+          showSelection
+          showCounterPill={false}
+          placeholder="Metric"
+        />
+        <Dropdown
           value={[String(radiusMeters)]}
           dataItems={radiusItems}
           onChange={onRadiusChange}
@@ -384,13 +405,7 @@ export default function App({ api, pageState: _pageState }: AppProps) {
       {report ? (
         <>
           <Summary report={report} />
-          <div
-            style={{
-              display: "flex",
-              flexDirection: "column",
-              gap: 12,
-            }}
-          >
+          <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
             {report.vehicles.map((v) => (
               <VehicleReport key={v.deviceId} vehicle={v} session={session} />
             ))}
@@ -408,11 +423,14 @@ export default function App({ api, pageState: _pageState }: AppProps) {
 
       <footer className="ehz-footer">
         <small>
-          Engine hours sourced from{" "}
-          <code>DiagnosticEngineHoursAdjustmentId</code>. Values interpolated
-          between bracketing StatusData samples. Trip and stop boundaries from
-          the Trip object's <code>start</code> / <code>stop</code> /{" "}
-          <code>nextTripStart</code>.
+          <strong>Ignition mode</strong> integrates DiagnosticIgnitionId
+          on/off events to compute key-on time — works on every device,
+          including 3-wire GO Rugged installs.{" "}
+          <strong>Engine Hours mode</strong> uses{" "}
+          <code>DiagnosticEngineHoursAdjustmentId</code>, the calibrated
+          cumulative value MyGeotab's UI uses (requires engine-bus wiring).
+          Zones are shared across all selected vehicles, so the same location
+          always carries the same Z-id.
         </small>
       </footer>
     </div>

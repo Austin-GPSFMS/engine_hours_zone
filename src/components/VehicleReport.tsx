@@ -71,13 +71,11 @@ export function VehicleReport({ vehicle, session }: VehicleReportProps) {
         <span className="ehz-vehicle-stats">
           <span>
             {vehicle.totalTrips} trips · {vehicle.totalStops} stops ·{" "}
-            {vehicle.clusters.length} zones
+            {vehicle.zones.length} zones
           </span>
           <span>
-            Trip {secondsToHours(vehicle.totalTripEngineSeconds)} hrs · Stop{" "}
-            <strong>
-              {secondsToHours(vehicle.totalStopEngineSeconds)} hrs
-            </strong>
+            Trip {secondsToHours(vehicle.totalTripSeconds)} hrs · Stop{" "}
+            <strong>{secondsToHours(vehicle.totalStopSeconds)} hrs</strong>
           </span>
         </span>
       </button>
@@ -104,8 +102,8 @@ function DaySection({
       <div className="ehz-day-header">
         <span className="ehz-day-label">{day.dayLabel}</span>
         <span className="ehz-day-stats">
-          Trip {secondsToHours(day.tripEngineSeconds)} hrs · Stop{" "}
-          <strong>{secondsToHours(day.stopEngineSeconds)} hrs</strong>
+          Trip {secondsToHours(day.tripSeconds)} hrs · Stop{" "}
+          <strong>{secondsToHours(day.stopSeconds)} hrs</strong>
         </span>
       </div>
       <div className="ehz-table-wrap">
@@ -117,13 +115,13 @@ function DaySection({
               <th>Detail</th>
               <th style={{ width: 90 }}>Duration</th>
               <th style={{ width: 90 }} className="ehz-num">
-                Entry EH
+                Entry
               </th>
               <th style={{ width: 90 }} className="ehz-num">
-                Exit EH
+                Exit
               </th>
               <th style={{ width: 80 }} className="ehz-num">
-                Δ EH
+                Δ hrs
               </th>
             </tr>
           </thead>
@@ -147,9 +145,9 @@ function SegmentRow({
 }) {
   const time = `${formatTime(segment.start)} – ${formatTime(segment.end)}`;
   const duration = formatDuration(segment.durationMs);
-  const entry = secondsToHours(segment.entryEngineSeconds);
-  const exit = secondsToHours(segment.exitEngineSeconds);
-  const delta = secondsToHours(segment.accumulatedEngineSeconds);
+  const entry = secondsToHours(segment.entrySeconds);
+  const exit = secondsToHours(segment.exitSeconds);
+  const delta = secondsToHours(segment.accumulatedSeconds);
 
   if (segment.type === "trip") {
     const from =

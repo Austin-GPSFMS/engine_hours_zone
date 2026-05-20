@@ -1,28 +1,34 @@
 /**
- * Multi-vehicle orchestration.
+ * Multi-vehicle orchestration with GLOBAL zone clustering.
  *
- *   buildMultiVehicleReport(api, deviceIds, from, to, radius, onProgress)
- *     1. For each device (in concurrent batches), fetch Trip + StatusData.
- *     2. Build stops and cluster them per-device (each vehicle's zones are
- *        independent — Z1 on Vehicle A is unrelated to Z1 on Vehicle B).
- *     3. After all per-vehicle work is done, reverse-geocode every cluster
- *        center across all vehicles in ONE GetAddresses call.
- *     4. Build trip+stop segments per vehicle (now that addresses exist).
- *     5. Group segments by local-time day.
- *
- * Concurrency is capped to keep us polite to the MyGeotab rate limiter
- * even when running across hundreds of vehicles.
+ * Pipeline:
+ *   1. For each device (concurrent batches), fetch Trip + StatusData and
+ *      build the per-vehicle stop list. Stops are tagged with deviceId.
+ *   2. Pool every stop from every vehicle into a single array and cluster
+ *      ONCE — so 315 US-70 gets the same Zone ID regardless of which
+ *      vehicle visited it first. The result is `globalClusters`.
+ *   3. Reverse-geocode every global cluster center in one GetAddresses call.
+ *   4. For each vehicle: build segments using a per-vehicle lookup of
+ *      tripIndex → cluster (so each segment row references the canonical
+ *      global zone), then bucket segments by day, and compute per-vehicle
+ *      zone stats over the cluster subset this vehicle actually visited.
  */
 
 import type {
+  Cluster,
   GeotabApi,
   GeotabDevice,
+  GeotabStatusData,
+  GeotabTrip,
+  Metric,
   MultiVehicleReport,
+  Stop,
   VehicleBucket,
+  VehicleZoneStats,
 } from "../types";
 import {
   fetchAddresses,
-  fetchTripsAndEngineHours,
+  fetchTripsAndStatus,
   friendlyError,
 } from "../api/geotab";
 import {
@@ -35,11 +41,12 @@ import {
 const CONCURRENCY = 3;
 
 interface PartialBucket {
-  bucket: VehicleBucket;
-  /** Trips kept around so we can build segments after geocoding addresses. */
-  trips: import("../types").GeotabTrip[];
-  /** Engine-hours samples kept for the same reason. */
-  engineHours: import("../types").GeotabStatusData[];
+  deviceId: string;
+  deviceName: string;
+  trips: GeotabTrip[];
+  statusData: GeotabStatusData[];
+  stops: Stop[];
+  error?: string;
 }
 
 export interface BuildArgs {
@@ -49,7 +56,7 @@ export interface BuildArgs {
   fromDate: string;
   toDate: string;
   radiusMeters: number;
-  /** Optional progress callback — fired after each vehicle's fetch completes. */
+  metric: Metric;
   onProgress?: (done: number, total: number, currentName: string) => void;
 }
 
@@ -60,12 +67,13 @@ export async function buildMultiVehicleReport({
   fromDate,
   toDate,
   radiusMeters,
+  metric,
   onProgress,
 }: BuildArgs): Promise<MultiVehicleReport> {
+  // --- Phase 1: per-vehicle fetch + buildStops ---
   const partials: PartialBucket[] = [];
   let done = 0;
 
-  // --- Phase 1: per-vehicle fetch + cluster (concurrent batches) ---
   for (let i = 0; i < deviceIds.length; i += CONCURRENCY) {
     const batch = deviceIds.slice(i, i + CONCURRENCY);
     const batchResults = await Promise.all(
@@ -73,43 +81,23 @@ export async function buildMultiVehicleReport({
         const device = devicesById.get(deviceId);
         const deviceName = device?.name ?? deviceId;
         try {
-          const { trips, engineHours } = await fetchTripsAndEngineHours(
+          const { trips, statusData } = await fetchTripsAndStatus(
             api,
             deviceId,
             fromDate,
-            toDate
+            toDate,
+            metric
           );
-          const stops = buildStops(trips, engineHours);
-          const clusters = clusterStops(stops, radiusMeters);
-          return {
-            bucket: {
-              deviceId,
-              deviceName,
-              days: [],
-              clusters,
-              totalStopEngineSeconds: 0,
-              totalTripEngineSeconds: 0,
-              totalStops: stops.length,
-              totalTrips: trips.length,
-            },
-            trips,
-            engineHours,
-          };
+          const stops = buildStops(deviceId, trips, statusData, metric);
+          return { deviceId, deviceName, trips, statusData, stops };
         } catch (err) {
           return {
-            bucket: {
-              deviceId,
-              deviceName,
-              days: [],
-              clusters: [],
-              totalStopEngineSeconds: 0,
-              totalTripEngineSeconds: 0,
-              totalStops: 0,
-              totalTrips: 0,
-              error: friendlyError(err),
-            },
+            deviceId,
+            deviceName,
             trips: [],
-            engineHours: [],
+            statusData: [],
+            stops: [],
+            error: friendlyError(err),
           };
         }
       })
@@ -117,45 +105,95 @@ export async function buildMultiVehicleReport({
     for (const p of batchResults) {
       partials.push(p);
       done++;
-      onProgress?.(done, deviceIds.length, p.bucket.deviceName);
+      onProgress?.(done, deviceIds.length, p.deviceName);
     }
   }
 
-  // --- Phase 2: batched reverse-geocode across ALL clusters ---
-  const allClusters = partials.flatMap((p) => p.bucket.clusters);
-  if (allClusters.length > 0) {
+  // --- Phase 2: pool stops, cluster globally ---
+  const allStops: Stop[] = partials.flatMap((p) => p.stops);
+  const globalClusters = clusterStops(allStops, radiusMeters);
+
+  // --- Phase 3: batched reverse-geocode across global clusters ---
+  if (globalClusters.length > 0) {
     const addrs = await fetchAddresses(
       api,
-      allClusters.map((c) => ({ lat: c.centerLat, lng: c.centerLng }))
+      globalClusters.map((c) => ({ lat: c.centerLat, lng: c.centerLng }))
     );
-    allClusters.forEach((c, idx) => {
+    globalClusters.forEach((c, i) => {
       c.address =
-        addrs[idx] ?? `${c.centerLat.toFixed(5)}, ${c.centerLng.toFixed(5)}`;
+        addrs[i] ?? `${c.centerLat.toFixed(5)}, ${c.centerLng.toFixed(5)}`;
     });
   }
 
-  // --- Phase 3: build segments + day buckets per vehicle ---
-  for (const p of partials) {
-    if (p.bucket.error) continue;
+  // --- Phase 4: per-vehicle segments + day buckets + zone stats ---
+  const vehicles: VehicleBucket[] = partials.map((p) => {
+    if (p.error) {
+      return {
+        deviceId: p.deviceId,
+        deviceName: p.deviceName,
+        days: [],
+        zones: [],
+        totalStopSeconds: 0,
+        totalTripSeconds: 0,
+        totalStops: 0,
+        totalTrips: 0,
+        error: p.error,
+      };
+    }
+
+    // Build a per-vehicle map: tripIndex → global cluster. We walk the
+    // global clusters once and pick out the stops whose deviceId matches.
+    const clusterByTripIndex = new Map<number, Cluster>();
+    for (const c of globalClusters) {
+      for (const s of c.stops) {
+        if (s.deviceId === p.deviceId) {
+          clusterByTripIndex.set(s.tripIndex, c);
+        }
+      }
+    }
+
     const segments = buildSegments(
       p.trips,
-      p.engineHours,
-      p.bucket.clusters
+      p.statusData,
+      p.stops,
+      clusterByTripIndex,
+      metric
     );
     const days = bucketByDay(segments);
-    p.bucket.days = days;
-    p.bucket.totalStopEngineSeconds = days.reduce(
-      (s, d) => s + d.stopEngineSeconds,
-      0
-    );
-    p.bucket.totalTripEngineSeconds = days.reduce(
-      (s, d) => s + d.tripEngineSeconds,
-      0
-    );
-  }
 
-  // --- Phase 4: roll up totals ---
-  const vehicles = partials.map((p) => p.bucket);
+    // Per-vehicle zone stats: iterate the clusters this vehicle visited
+    // and aggregate over THIS vehicle's stops only.
+    const zoneStats: VehicleZoneStats[] = [];
+    for (const c of globalClusters) {
+      const mine = c.stops.filter((s) => s.deviceId === p.deviceId);
+      if (mine.length === 0) continue;
+      let sec = 0;
+      let dur = 0;
+      for (const s of mine) {
+        if (s.accumulatedSeconds != null) sec += s.accumulatedSeconds;
+        dur += s.durationMs;
+      }
+      zoneStats.push({
+        zone: c,
+        visits: mine.length,
+        totalSeconds: sec,
+        totalStoppedMs: dur,
+      });
+    }
+
+    return {
+      deviceId: p.deviceId,
+      deviceName: p.deviceName,
+      days,
+      zones: zoneStats,
+      totalStopSeconds: days.reduce((s, d) => s + d.stopSeconds, 0),
+      totalTripSeconds: days.reduce((s, d) => s + d.tripSeconds, 0),
+      totalStops: p.stops.length,
+      totalTrips: p.trips.length,
+    };
+  });
+
+  // --- Phase 5: top-line rollups ---
   const successful = vehicles.filter((v) => !v.error);
   const totals = {
     vehicleCount: vehicles.length,
@@ -164,28 +202,25 @@ export async function buildMultiVehicleReport({
       (s, v) => s + v.days.reduce((d, day) => d + day.segments.length, 0),
       0
     ),
-    totalStopEngineSeconds: vehicles.reduce(
-      (s, v) => s + v.totalStopEngineSeconds,
-      0
-    ),
-    totalTripEngineSeconds: vehicles.reduce(
-      (s, v) => s + v.totalTripEngineSeconds,
-      0
-    ),
+    totalStopSeconds: vehicles.reduce((s, v) => s + v.totalStopSeconds, 0),
+    totalTripSeconds: vehicles.reduce((s, v) => s + v.totalTripSeconds, 0),
   };
 
-  // Sort vehicles: most engine hours first (most relevant to the user).
+  // Sort vehicles by total operating time (descending) so the busiest
+  // vehicle is at the top of the in-app and Excel views.
   vehicles.sort(
     (a, b) =>
-      b.totalStopEngineSeconds +
-      b.totalTripEngineSeconds -
-      (a.totalStopEngineSeconds + a.totalTripEngineSeconds)
+      b.totalStopSeconds +
+      b.totalTripSeconds -
+      (a.totalStopSeconds + a.totalTripSeconds)
   );
 
   return {
     fromDate,
     toDate,
     radiusMeters,
+    metric,
+    zones: globalClusters,
     vehicles,
     totals,
   };
