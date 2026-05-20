@@ -308,6 +308,22 @@ body,
   margin-right: 4px;
 }
 
+.ehz-anchor-note {
+  font-size: 12px;
+  color: #1e40af;
+  background: #eff6ff;
+  border: 1px solid #bfdbfe;
+  border-radius: 4px;
+  padding: 8px 12px;
+  margin-bottom: 8px;
+}
+
+.ehz-anchor-note-warn {
+  color: #92400e;
+  background: #fef3c7;
+  border-color: #fcd34d;
+}
+
 .ehz-empty {
   padding: 24px;
   text-align: center;

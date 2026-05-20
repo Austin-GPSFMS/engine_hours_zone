@@ -111,6 +111,16 @@ export const METRIC_LABEL: Record<Metric, string> = {
 };
 
 /**
+ * A known engine-hours reading used to anchor ignition-mode values to an
+ * absolute engine-hours scale. `value` is cumulative engine seconds (the
+ * raw API unit for DiagnosticEngineHoursAdjustmentId).
+ */
+export interface EngineHoursAnchor {
+  dateTime: string;
+  value: number;
+}
+
+/**
  * A single stop period (gap between two consecutive trips) on a device.
  * Carries both the entry and exit cumulative metric readings so we can
  * show "200.45 → 203.55" alongside the delta.
@@ -216,6 +226,12 @@ export interface VehicleBucket {
   totalTripSeconds: number;
   totalStops: number;
   totalTrips: number;
+  /**
+   * For ignition mode: the engine-hours reading used to anchor this
+   * vehicle's absolute hour values. Null when no engine data is available
+   * (true 3-wire installs) — in that case Entry/Exit are relative cumulative.
+   */
+  anchor?: EngineHoursAnchor | null;
   error?: string;
 }
 

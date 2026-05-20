@@ -7,6 +7,7 @@
  */
 
 import type {
+  EngineHoursAnchor,
   GeotabApi,
   GeotabAddress,
   GeotabDevice,
@@ -148,14 +149,65 @@ export async function fetchDevices(
 }
 
 /**
+ * Find the most recent DiagnosticEngineHoursAdjustmentId reading for a
+ * device, regardless of when it was reported. Used as the anchor for
+ * ignition-mode reports so the Entry/Exit values come out as absolute
+ * engine-hours readings rather than relative cumulative ignition time.
+ *
+ * Returns null when the device has never reported engine-hours data
+ * (true 3-wire installs without engine-bus wiring). The caller falls back
+ * to relative cumulative in that case.
+ *
+ * Strategy: try a 30-day lookback first (covers virtually every active
+ * vehicle), then widen to 365 days, then 5 years. Takes the latest
+ * sample by dateTime from whichever window succeeds.
+ */
+export async function fetchEngineHoursAnchor(
+  api: GeotabApi,
+  deviceId: string
+): Promise<EngineHoursAnchor | null> {
+  const now = Date.now();
+  const windows = [
+    30 * 24 * 60 * 60 * 1000,
+    365 * 24 * 60 * 60 * 1000,
+    5 * 365 * 24 * 60 * 60 * 1000,
+  ];
+  for (const lookback of windows) {
+    const from = new Date(now - lookback).toISOString();
+    const to = new Date(now).toISOString();
+    const records = await apiCall<GeotabStatusData[]>(api, "Get", {
+      typeName: "StatusData",
+      search: {
+        deviceSearch: { id: deviceId },
+        diagnosticSearch: { id: ENGINE_HOURS_DIAGNOSTIC_ID },
+        fromDate: from,
+        toDate: to,
+      },
+      resultsLimit: 500,
+    });
+    if (records && records.length > 0) {
+      const latest = records.reduce((acc, r) =>
+        !acc || new Date(r.dateTime).getTime() > new Date(acc.dateTime).getTime()
+          ? r
+          : acc
+      );
+      return { dateTime: latest.dateTime, value: latest.data };
+    }
+  }
+  return null;
+}
+
+/**
  * Fetch trips and the chosen metric's StatusData for a single device.
  *
  * Pad varies by metric:
  *  - engineHours: ±1 hour is plenty, the counter changes smoothly.
- *  - ignition:    needs more padding (~24h) so the integration can
- *                 establish the initial on/off state from the prior event.
- *                 Without a prior reading we don't know if the very first
- *                 sample is the "first" event or just a heartbeat.
+ *  - ignition:    needs more padding for context. We always pad 24h before
+ *                 the report window to establish the prior state. On the
+ *                 `to` side, when an anchor timestamp is provided we extend
+ *                 through that anchor (plus 1h), so the integration between
+ *                 the anchor and each segment timestamp has continuous
+ *                 event coverage.
  *
  * Both arrays come back time-sorted.
  */
@@ -164,13 +216,26 @@ export async function fetchTripsAndStatus(
   deviceId: string,
   fromDate: string,
   toDate: string,
-  metric: Metric
+  metric: Metric,
+  anchorEnd?: string | null
 ): Promise<{ trips: GeotabTrip[]; statusData: GeotabStatusData[] }> {
-  const padMs = metric === "ignition" ? 24 * 60 * 60 * 1000 : 60 * 60 * 1000;
+  const fromPadMs =
+    metric === "ignition" ? 24 * 60 * 60 * 1000 : 60 * 60 * 1000;
   const statusFrom = new Date(
-    new Date(fromDate).getTime() - padMs
+    new Date(fromDate).getTime() - fromPadMs
   ).toISOString();
-  const statusTo = new Date(new Date(toDate).getTime() + padMs).toISOString();
+
+  // Determine the upper bound of the StatusData fetch. For ignition with
+  // an anchor we need events all the way through the anchor timestamp.
+  let statusToMs = new Date(toDate).getTime() + 60 * 60 * 1000;
+  if (metric === "ignition" && anchorEnd) {
+    const anchorMs = new Date(anchorEnd).getTime() + 60 * 60 * 1000;
+    if (anchorMs > statusToMs) statusToMs = anchorMs;
+  } else if (metric === "ignition") {
+    // No anchor — keep the original 24h trailing pad.
+    statusToMs = new Date(toDate).getTime() + 24 * 60 * 60 * 1000;
+  }
+  const statusTo = new Date(statusToMs).toISOString();
 
   const [trips, statusData] = await Promise.all([
     apiCall<GeotabTrip[]>(api, "Get", {

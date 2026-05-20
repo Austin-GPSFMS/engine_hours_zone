@@ -1,24 +1,27 @@
 /**
- * Cumulative-metric math for both ignition and engine-hours modes.
+ * Cumulative-metric math for ignition and engine-hours modes.
  *
  *   engineHours mode — DiagnosticEngineHoursAdjustmentId is a monotonically
  *                      increasing counter in seconds. Linearly interpolate
- *                      between the bracketing reported samples to estimate
- *                      the value at any timestamp.
+ *                      between the bracketing reported samples.
  *
- *   ignition    mode — DiagnosticIgnitionId reports 1 (on) and 0 (off) at
- *                      every state change (plus periodic heartbeats). To
- *                      compute "cumulative ignition-on seconds up to time T"
- *                      we walk every event in order and add (event_time -
- *                      previous_event_time) whenever the previous state
- *                      was 1, stopping at T.
+ *   ignition mode with anchor —
+ *                      Take a known engine-hours reading (the anchor) at a
+ *                      recent timestamp, then walk ignition on/off events
+ *                      between the anchor and the requested target to
+ *                      compute the engine-hours value at that moment.
+ *                      When the target is OLDER than the anchor (the usual
+ *                      case for historical reports), the ignition-on time
+ *                      between them is subtracted from the anchor value.
  *
- * Both functions return cumulative seconds since the start of the records
- * array. Callers compute deltas (exit − entry) for "seconds during this
- * segment".
+ *   ignition mode no anchor —
+ *                      Cumulative ignition-on seconds since the first event
+ *                      in the records array. This is a RELATIVE value, only
+ *                      meaningful as a delta. Used only when no engine-hours
+ *                      reading exists for the device (true 3-wire installs).
  */
 
-import type { GeotabStatusData, Metric } from "../types";
+import type { EngineHoursAnchor, GeotabStatusData, Metric } from "../types";
 
 /** Linearly interpolate cumulative engine-hour seconds at targetDate. */
 export function interpolateEngineHours(
@@ -51,62 +54,87 @@ export function interpolateEngineHours(
 }
 
 /**
- * Cumulative ignition-on seconds from the first event up to targetDate.
- *
- * Walks events in chronological order. For each consecutive pair, if the
- * previous state was 1, the gap (in seconds) gets added to the running total.
- * When we cross targetDate, we account for the partial interval up to T and
- * stop.
- *
- * The first event establishes the "current state" — anything before the
- * first event is unknown and treated as if the metric clock starts at 0.
- * In practice we fetch with a padded window so the first event is well
- * before the first segment we care about, making the integration accurate
- * over the report window.
+ * Total ignition-on seconds between two timestamps. Walks events in order,
+ * tracking the state at startMs (last event before startMs gives initial
+ * state) and accumulating ignition-on duration until endMs.
  */
-export function integrateIgnition(
-  records: GeotabStatusData[],
-  targetDate: string | Date
-): number | null {
-  if (!records || records.length === 0) return null;
-  const target = new Date(targetDate).getTime();
-  let total = 0;
-  let lastTime: number | null = null;
-  let lastState: number | null = null;
+export function integrateIgnitionBetween(
+  events: GeotabStatusData[],
+  startMs: number,
+  endMs: number
+): number {
+  if (startMs >= endMs) return 0;
+  if (!events || events.length === 0) return 0;
 
-  for (const r of records) {
-    const t = new Date(r.dateTime).getTime();
-    if (t >= target) {
-      // Crossed the target — close out the partial interval.
-      if (lastTime !== null && lastState === 1) {
-        total += (target - lastTime) / 1000;
-      }
+  // Determine the state at startMs from the last event at or before it.
+  let prevState = 0;
+  for (const ev of events) {
+    const t = new Date(ev.dateTime).getTime();
+    if (t <= startMs) {
+      prevState = ev.data;
+    } else {
+      break;
+    }
+  }
+
+  let total = 0;
+  let prevTime = startMs;
+
+  for (const ev of events) {
+    const t = new Date(ev.dateTime).getTime();
+    if (t <= startMs) continue;
+    if (t >= endMs) {
+      if (prevState === 1) total += (endMs - prevTime) / 1000;
       return total;
     }
-    if (lastTime !== null && lastState === 1) {
-      total += (t - lastTime) / 1000;
-    }
-    lastTime = t;
-    lastState = r.data;
+    if (prevState === 1) total += (t - prevTime) / 1000;
+    prevState = ev.data;
+    prevTime = t;
   }
-  // Target is past the last event — extend the final state to the target.
-  if (lastTime !== null && lastState === 1) {
-    total += (target - lastTime) / 1000;
-  }
+  if (prevState === 1) total += (endMs - prevTime) / 1000;
   return total;
 }
 
 /**
- * Compute cumulative metric seconds at targetDate, dispatching on the
- * active metric. Returns null when there's no data to base the answer on.
+ * Cumulative ignition-on seconds from the first event in the records to
+ * the target. Only meaningful for delta calculations. Used as the fallback
+ * when no anchor is available.
  */
-export function computeMetricAt(
+export function integrateIgnitionCumulative(
+  events: GeotabStatusData[],
+  targetDate: string | Date
+): number | null {
+  if (!events || events.length === 0) return null;
+  const firstT = new Date(events[0].dateTime).getTime();
+  const targetT = new Date(targetDate).getTime();
+  if (targetT <= firstT) return 0;
+  return integrateIgnitionBetween(events, firstT, targetT);
+}
+
+/**
+ * Top-level helper — returns the cumulative metric value at `target`,
+ * dispatching on metric and (for ignition) whether an anchor is available.
+ */
+export function metricValueAt(
   records: GeotabStatusData[],
-  targetDate: string | Date,
-  metric: Metric
+  target: string | Date,
+  metric: Metric,
+  anchor?: EngineHoursAnchor | null
 ): number | null {
   if (metric === "engineHours") {
-    return interpolateEngineHours(records, targetDate);
+    return interpolateEngineHours(records, target);
   }
-  return integrateIgnition(records, targetDate);
+  // Ignition mode
+  if (anchor) {
+    const targetMs = new Date(target).getTime();
+    const anchorMs = new Date(anchor.dateTime).getTime();
+    if (targetMs === anchorMs) return anchor.value;
+    if (targetMs < anchorMs) {
+      const delta = integrateIgnitionBetween(records, targetMs, anchorMs);
+      return Math.max(0, anchor.value - delta);
+    }
+    const delta = integrateIgnitionBetween(records, anchorMs, targetMs);
+    return anchor.value + delta;
+  }
+  return integrateIgnitionCumulative(records, target);
 }

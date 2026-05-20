@@ -6,6 +6,7 @@ import type {
   VehicleBucket,
 } from "../types";
 import {
+  formatDateTime,
   formatDuration,
   formatTime,
   kmToMiles,
@@ -81,6 +82,22 @@ export function VehicleReport({ vehicle, session }: VehicleReportProps) {
       </button>
       {open && (
         <div className="ehz-vehicle-body">
+          {vehicle.anchor ? (
+            <div className="ehz-anchor-note">
+              <strong>Anchor:</strong>{" "}
+              {secondsToHours(vehicle.anchor.value)} engine hrs at{" "}
+              {formatDateTime(vehicle.anchor.dateTime)} — Entry/Exit values are
+              absolute engine hours computed by subtracting ignition-on time
+              backward from this reading.
+            </div>
+          ) : (
+            <div className="ehz-anchor-note ehz-anchor-note-warn">
+              <strong>No engine-hours anchor found.</strong> This device has
+              never reported the engine-hours diagnostic (likely a 3-wire
+              install). Entry/Exit values are relative cumulative ignition
+              time within the report window — only Δ is a meaningful absolute.
+            </div>
+          )}
           {vehicle.days.map((day) => (
             <DaySection key={day.day} day={day} session={session} />
           ))}

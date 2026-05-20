@@ -12,13 +12,14 @@
 import type {
   Cluster,
   DayBucket,
+  EngineHoursAnchor,
   GeotabStatusData,
   GeotabTrip,
   Metric,
   Segment,
   Stop,
 } from "../types";
-import { computeMetricAt } from "./metric";
+import { metricValueAt } from "./metric";
 
 /** 1 mile expressed in meters — used as the default cluster radius. */
 export const ONE_MILE_METERS = 1609.34;
@@ -56,7 +57,8 @@ export function buildStops(
   deviceId: string,
   trips: GeotabTrip[],
   statusData: GeotabStatusData[],
-  metric: Metric
+  metric: Metric,
+  anchor?: EngineHoursAnchor | null
 ): Stop[] {
   const stops: Stop[] = [];
   for (let i = 0; i < trips.length; i++) {
@@ -64,8 +66,8 @@ export function buildStops(
     const sp = trip.stopPoint;
     if (!sp || sp.x == null || sp.y == null) continue;
     if (!trip.nextTripStart) continue;
-    const entry = computeMetricAt(statusData, trip.stop, metric);
-    const exit = computeMetricAt(statusData, trip.nextTripStart, metric);
+    const entry = metricValueAt(statusData, trip.stop, metric, anchor);
+    const exit = metricValueAt(statusData, trip.nextTripStart, metric, anchor);
     const accumulated =
       entry != null && exit != null ? Math.max(0, exit - entry) : null;
     stops.push({
@@ -157,7 +159,8 @@ export function buildSegments(
   statusData: GeotabStatusData[],
   stops: Stop[],
   clusterByTripIndex: Map<number, Cluster>,
-  metric: Metric
+  metric: Metric,
+  anchor?: EngineHoursAnchor | null
 ): Segment[] {
   // We still need quick access to per-stop entry/exit values keyed by trip.
   const stopByTripIndex = new Map<number, Stop>();
@@ -166,8 +169,8 @@ export function buildSegments(
   const segments: Segment[] = [];
   for (let i = 0; i < trips.length; i++) {
     const trip = trips[i];
-    const entry = computeMetricAt(statusData, trip.start, metric);
-    const exit = computeMetricAt(statusData, trip.stop, metric);
+    const entry = metricValueAt(statusData, trip.start, metric, anchor);
+    const exit = metricValueAt(statusData, trip.stop, metric, anchor);
     const acc =
       entry != null && exit != null ? Math.max(0, exit - entry) : null;
 
