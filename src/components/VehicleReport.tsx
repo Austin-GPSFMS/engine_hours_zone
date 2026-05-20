@@ -167,10 +167,12 @@ function SegmentRow({
   const delta = secondsToHours(segment.accumulatedSeconds);
 
   if (segment.type === "trip") {
+    // First trip in the report window has no predecessor stop in scope —
+    // label as such instead of rendering an empty origin.
     const from =
       segment.fromZoneId != null
         ? `${segment.fromZoneId} · ${segment.fromAddress ?? ""}`
-        : null;
+        : "(before report period)";
     const to =
       segment.toZoneId != null
         ? `${segment.toZoneId} · ${segment.toAddress ?? ""}`

@@ -67,6 +67,22 @@ export interface BuildArgs {
   onProgress?: (done: number, total: number, currentName: string) => void;
 }
 
+/**
+ * Geotab occasionally emits Trip records with distance == 0 AND start ==
+ * stop — usually triggered by an ignition-on event without movement, or
+ * other internal trip-generator edge cases. These add nothing but noise
+ * to the report (zero-duration, zero-distance, no real Origin). Filter
+ * them out before they hit the segment builder. Tiny-but-real trips
+ * (e.g. 0.01 mi over 15 s) are kept since at least one condition fails.
+ */
+function isMeaningfulTrip(t: GeotabTrip): boolean {
+  const dist = t.distance ?? 0;
+  if (dist > 0) return true;
+  const startMs = new Date(t.start).getTime();
+  const stopMs = new Date(t.stop).getTime();
+  return stopMs - startMs >= 1000;
+}
+
 async function processDevice(
   api: GeotabApi,
   deviceId: string,
@@ -76,8 +92,6 @@ async function processDevice(
   metric: Metric
 ): Promise<PartialBucket> {
   try {
-    // In ignition mode, fetch the engine-hours anchor first so the
-    // ignition StatusData fetch can extend through the anchor timestamp.
     const anchor =
       metric === "ignition"
         ? await fetchEngineHoursAnchor(api, deviceId)
@@ -91,9 +105,23 @@ async function processDevice(
       metric,
       anchor?.dateTime
     );
-    const stops = buildStops(deviceId, trips, statusData, metric, anchor);
+    const meaningfulTrips = trips.filter(isMeaningfulTrip);
+    const stops = buildStops(
+      deviceId,
+      meaningfulTrips,
+      statusData,
+      metric,
+      anchor
+    );
 
-    return { deviceId, deviceName, trips, statusData, stops, anchor };
+    return {
+      deviceId,
+      deviceName,
+      trips: meaningfulTrips,
+      statusData,
+      stops,
+      anchor,
+    };
   } catch (err) {
     return {
       deviceId,

@@ -70,6 +70,18 @@ function msToHours(ms: number | null | undefined): number | null {
   return ms == null ? null : Number((ms / 3600000).toFixed(2));
 }
 
+/**
+ * Convert milliseconds to a fraction-of-a-day value that Excel can format
+ * as a time (e.g. with `numFmt = "[h]:mm"`). Excel time values are
+ * fractions of a 24-hour day — 0.5 = noon, 1.0 = 24 hours. Using `[h]:mm`
+ * (bracketed h) keeps the hour count from rolling over after 24h, so a
+ * 36-hour stop renders as `36:00` instead of `12:00`.
+ */
+function msToExcelTime(ms: number | null | undefined): number | null {
+  if (ms == null) return null;
+  return ms / (1000 * 60 * 60 * 24);
+}
+
 function kmToMi(km: number | null | undefined): number | null {
   return km == null ? null : Number((km / KM_PER_MILE).toFixed(2));
 }
@@ -145,7 +157,7 @@ const SEGMENT_HEADERS = [
   "Type",
   "Start",
   "End",
-  "Duration (hrs)",
+  "Duration (hh:mm)",
   "Distance (mi)",
   "Origin",
   "Destination",
@@ -157,6 +169,10 @@ const SEGMENT_HEADERS = [
 
 const SEGMENT_COL_WIDTHS = [22, 12, 22, 10, 20, 20, 14, 14, 50, 50, 14, 14, 12, 14];
 const SEGMENTS_HEADER_ROW = 8;
+/** Excel time format that doesn't roll over at 24 hours. */
+const DURATION_FMT = "[h]:mm";
+/** Origin label shown for trips whose predecessor falls outside the report. */
+const BEFORE_REPORT_LABEL = "(before report period)";
 
 async function writeSegmentsSheet(
   wb: ExcelJS.Workbook,
@@ -171,8 +187,11 @@ async function writeSegmentsSheet(
   SEGMENT_COL_WIDTHS.forEach((w, i) => {
     seg.getColumn(i + 1).width = w;
   });
+  // Origin / Destination: text wrap so long addresses stay readable.
   seg.getColumn(9).alignment = { wrapText: true, vertical: "top" };
   seg.getColumn(10).alignment = { wrapText: true, vertical: "top" };
+  // Duration column rendered as Excel time (hh:mm, no 24h rollover).
+  seg.getColumn(7).numFmt = DURATION_FMT;
 
   for (let r = 1; r <= SEGMENTS_HEADER_ROW - 1; r++) {
     seg.getRow(r).height = 22;
@@ -191,6 +210,9 @@ async function writeSegmentsSheet(
   titleCell.font = TITLE_FONT;
   titleCell.alignment = { vertical: "middle" };
 
+  // 5 rows (3-7) — keep row 8 free for the column header so its merges
+  // don't collide with the data table headers. "Generated:" still appears
+  // on the Report Metadata sheet for full provenance.
   const metaRows: Array<[string, string | number]> = [
     [
       "Period:",
@@ -205,7 +227,6 @@ async function writeSegmentsSheet(
         : "(unknown — standalone export)",
     ],
     ["Cluster radius:", `${(report.radiusMeters / 1609.34).toFixed(2)} miles`],
-    ["Generated:", formatDateTime(new Date())],
   ];
   metaRows.forEach(([label, value], i) => {
     const r = i + 3;
@@ -261,7 +282,13 @@ async function writeSegmentsSheet(
         let url: string | null = null;
 
         if (s.type === "trip") {
-          origin = formatLocation(s.fromZoneId, s.fromAddress);
+          // First-trip-in-window case: predecessor stop is outside our data
+          // visibility, so label the origin explicitly rather than leaving
+          // it blank.
+          origin =
+            s.fromZoneId != null
+              ? formatLocation(s.fromZoneId, s.fromAddress)
+              : BEFORE_REPORT_LABEL;
           destination = formatLocation(s.toZoneId, s.toAddress);
           url = mapUrlForPoint(session, s.toLat, s.toLng, s.toAddress);
         } else {
@@ -277,7 +304,8 @@ async function writeSegmentsSheet(
         r.getCell(4).value = s.type === "trip" ? "Trip" : "Stop";
         r.getCell(5).value = formatDateTime(s.start);
         r.getCell(6).value = formatDateTime(s.end);
-        r.getCell(7).value = msToHours(s.durationMs);
+        // Duration: Excel time value formatted via column's [h]:mm numFmt.
+        r.getCell(7).value = msToExcelTime(s.durationMs);
         r.getCell(8).value =
           s.type === "trip" ? kmToMi(s.distanceKm) : null;
         r.getCell(9).value = origin;
