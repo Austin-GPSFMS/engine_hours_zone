@@ -73,8 +73,8 @@ const radiusItems: ISelectionItem[] = [
 ];
 
 const metricItems: ISelectionItem[] = [
-  { id: "ignition", name: "Metric: Ignition Time" },
-  { id: "engineHours", name: "Metric: Engine Hours" },
+  { id: "engineHours", name: "Metric: Engine Hours (recommended)" },
+  { id: "ignition", name: "Metric: Ignition Time (approximation, advanced)" },
 ];
 
 const ALL_VEHICLES_ID = "__ALL__";
@@ -113,7 +113,11 @@ export default function App({ api, pageState: _pageState }: AppProps) {
     defaultDateRange()
   );
   const [radiusMeters, setRadiusMeters] = useState<number>(ONE_MILE_METERS);
-  const [metric, setMetric] = useState<Metric>("ignition");
+  // Engine Hours is the right default for every device: MyGeotab populates
+  // DiagnosticEngineHoursAdjustmentId from the engine bus when wired, and
+  // increments it server-side from ignition events for 3-wire installs.
+  // Either way, the latest reading matches the Asset edit page's Run time.
+  const [metric, setMetric] = useState<Metric>("engineHours");
 
   // ---- Build state ----
   const [isBuilding, setIsBuilding] = useState(false);
@@ -423,14 +427,17 @@ export default function App({ api, pageState: _pageState }: AppProps) {
 
       <footer className="ehz-footer">
         <small>
-          <strong>Ignition mode</strong> integrates DiagnosticIgnitionId
-          on/off events to compute key-on time — works on every device,
-          including 3-wire GO Rugged installs.{" "}
-          <strong>Engine Hours mode</strong> uses{" "}
-          <code>DiagnosticEngineHoursAdjustmentId</code>, the calibrated
-          cumulative value MyGeotab's UI uses (requires engine-bus wiring).
-          Zones are shared across all selected vehicles, so the same location
-          always carries the same Z-id.
+          <strong>Engine Hours mode (default)</strong> reads{" "}
+          <code>DiagnosticEngineHoursAdjustmentId</code> directly — the same
+          value MyGeotab shows on the Asset edit page's Run time. Works for
+          both engine-bus-wired vehicles and 3-wire equipment (MyGeotab
+          populates the diagnostic server-side from ignition for 3-wire
+          installs).{" "}
+          <strong>Ignition Time mode</strong> integrates raw ignition events
+          ourselves with an anchor — kept as an advanced fallback only, since
+          it tends to overstate hours when operators leave the key in
+          accessory position. Zones are shared across all selected vehicles,
+          so the same location always carries the same Z-id.
         </small>
       </footer>
     </div>
