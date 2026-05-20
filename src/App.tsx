@@ -32,11 +32,13 @@ import type {
   GeotabDevice,
   GeotabGroup,
   GeotabPageState,
+  GeotabSessionInfo,
   MultiVehicleReport,
 } from "./types";
 import {
   fetchDevices,
   fetchGroups,
+  fetchSession,
   friendlyError,
 } from "./api/geotab";
 import { ONE_MILE_METERS } from "./utils/cluster";
@@ -80,6 +82,9 @@ function defaultDateRange(): IDateRangeValue {
 export default function App({ api, pageState: _pageState }: AppProps) {
   const insideMyGeotab = api != null;
 
+  // ---- Session (database + server) for building MyGeotab map URLs ----
+  const [session, setSession] = useState<GeotabSessionInfo | null>(null);
+
   // ---- Groups & devices ----
   const [groupsById, setGroupsById] = useState<Map<string, GeotabGroup>>(
     () => new Map()
@@ -114,10 +119,13 @@ export default function App({ api, pageState: _pageState }: AppProps) {
   } | null>(null);
   const [isExporting, setIsExporting] = useState(false);
 
-  // ---- Initial group load ----
+  // ---- Initial session + group load ----
   useEffect(() => {
     if (!api) return;
     let cancelled = false;
+    fetchSession(api).then((s) => {
+      if (!cancelled) setSession(s);
+    });
     fetchGroups(api)
       .then((m) => {
         if (cancelled) return;
@@ -227,13 +235,13 @@ export default function App({ api, pageState: _pageState }: AppProps) {
     if (!report) return;
     setIsExporting(true);
     try {
-      await exportToXlsx(report);
+      await exportToXlsx(report, session);
     } catch (e) {
       setBuildErr(`Export failed: ${friendlyError(e)}`);
     } finally {
       setIsExporting(false);
     }
-  }, [report]);
+  }, [report, session]);
 
   const onDevicesChange = (items: ISelectionItem[]) => {
     // If "All" got picked, collapse the selection to just All so the chip
@@ -384,7 +392,7 @@ export default function App({ api, pageState: _pageState }: AppProps) {
             }}
           >
             {report.vehicles.map((v) => (
-              <VehicleReport key={v.deviceId} vehicle={v} />
+              <VehicleReport key={v.deviceId} vehicle={v} session={session} />
             ))}
           </div>
         </>

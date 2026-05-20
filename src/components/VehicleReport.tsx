@@ -1,18 +1,33 @@
 import { useState } from "react";
-import type { DayBucket, Segment, VehicleBucket } from "../types";
+import type {
+  DayBucket,
+  GeotabSessionInfo,
+  Segment,
+  VehicleBucket,
+} from "../types";
 import {
   formatDuration,
   formatTime,
   kmToMiles,
   secondsToHours,
 } from "../utils/format";
+import { mapUrlForPoint } from "../utils/mapUrl";
+
+interface VehicleReportProps {
+  vehicle: VehicleBucket;
+  /**
+   * Current MyGeotab session (database + server). Used to build native map
+   * URLs. When null we fall back to Google Maps.
+   */
+  session: GeotabSessionInfo | null;
+}
 
 /**
  * One collapsible section per vehicle. Header shows the vehicle name with
  * totals (trip hrs, stop hrs, segment count). Body lists each day as a
  * subheader followed by a flat segment table.
  */
-export function VehicleReport({ vehicle }: { vehicle: VehicleBucket }) {
+export function VehicleReport({ vehicle, session }: VehicleReportProps) {
   const [open, setOpen] = useState(true);
 
   if (vehicle.error) {
@@ -69,7 +84,7 @@ export function VehicleReport({ vehicle }: { vehicle: VehicleBucket }) {
       {open && (
         <div className="ehz-vehicle-body">
           {vehicle.days.map((day) => (
-            <DaySection key={day.day} day={day} />
+            <DaySection key={day.day} day={day} session={session} />
           ))}
         </div>
       )}
@@ -77,7 +92,13 @@ export function VehicleReport({ vehicle }: { vehicle: VehicleBucket }) {
   );
 }
 
-function DaySection({ day }: { day: DayBucket }) {
+function DaySection({
+  day,
+  session,
+}: {
+  day: DayBucket;
+  session: GeotabSessionInfo | null;
+}) {
   return (
     <div className="ehz-day">
       <div className="ehz-day-header">
@@ -108,7 +129,7 @@ function DaySection({ day }: { day: DayBucket }) {
           </thead>
           <tbody>
             {day.segments.map((s, i) => (
-              <SegmentRow key={i} segment={s} />
+              <SegmentRow key={i} segment={s} session={session} />
             ))}
           </tbody>
         </table>
@@ -117,7 +138,13 @@ function DaySection({ day }: { day: DayBucket }) {
   );
 }
 
-function SegmentRow({ segment }: { segment: Segment }) {
+function SegmentRow({
+  segment,
+  session,
+}: {
+  segment: Segment;
+  session: GeotabSessionInfo | null;
+}) {
   const time = `${formatTime(segment.start)} – ${formatTime(segment.end)}`;
   const duration = formatDuration(segment.durationMs);
   const entry = secondsToHours(segment.entryEngineSeconds);
@@ -133,6 +160,12 @@ function SegmentRow({ segment }: { segment: Segment }) {
       segment.toZoneId != null
         ? `${segment.toZoneId} · ${segment.toAddress ?? ""}`
         : null;
+    const mapHref = mapUrlForPoint(
+      session,
+      segment.toLat,
+      segment.toLng,
+      segment.toAddress
+    );
     return (
       <tr className="ehz-row-trip">
         <td>{time}</td>
@@ -140,7 +173,19 @@ function SegmentRow({ segment }: { segment: Segment }) {
           <span className="ehz-pill ehz-pill-trip">Trip</span>
         </td>
         <td>
-          <div>{kmToMiles(segment.distanceKm)} mi</div>
+          <div>
+            {kmToMiles(segment.distanceKm)} mi
+            {mapHref && (
+              <a
+                className="ehz-maplink"
+                href={mapHref}
+                target="_blank"
+                rel="noopener"
+              >
+                map
+              </a>
+            )}
+          </div>
           {(from || to) && (
             <div className="ehz-tl-from-to">
               {from && (
@@ -164,6 +209,13 @@ function SegmentRow({ segment }: { segment: Segment }) {
       </tr>
     );
   }
+
+  const mapHref = mapUrlForPoint(
+    session,
+    segment.lat,
+    segment.lng,
+    segment.address
+  );
   return (
     <tr className="ehz-row-stop">
       <td>{time}</td>
@@ -172,14 +224,16 @@ function SegmentRow({ segment }: { segment: Segment }) {
       </td>
       <td>
         <strong>{segment.clusterId}</strong> · {segment.address ?? "—"}
-        <a
-          className="ehz-maplink"
-          href={`https://www.google.com/maps?q=${segment.lat},${segment.lng}`}
-          target="_blank"
-          rel="noopener"
-        >
-          map
-        </a>
+        {mapHref && (
+          <a
+            className="ehz-maplink"
+            href={mapHref}
+            target="_blank"
+            rel="noopener"
+          >
+            map
+          </a>
+        )}
       </td>
       <td>{duration}</td>
       <td className="ehz-num">{entry}</td>

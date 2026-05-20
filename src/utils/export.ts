@@ -17,8 +17,13 @@
 
 import ExcelJS from "exceljs";
 import logoUrl from "../assets/gpsfms-logo.png";
-import type { MultiVehicleReport, VehicleBucket } from "../types";
+import type {
+  GeotabSessionInfo,
+  MultiVehicleReport,
+  VehicleBucket,
+} from "../types";
 import { formatDateTime, KM_PER_MILE } from "./format";
+import { mapUrlForPoint } from "./mapUrl";
 
 const HEADER_FILL: ExcelJS.Fill = {
   type: "pattern",
@@ -78,21 +83,6 @@ function formatLocation(
   return z || a;
 }
 
-/** Build a Google Maps URL — prefers lat/lng coords, falls back to address text. */
-function mapsUrl(
-  lat: number | null | undefined,
-  lng: number | null | undefined,
-  address: string | null | undefined
-): string | null {
-  if (lat != null && lng != null) {
-    return `https://www.google.com/maps?q=${lat},${lng}`;
-  }
-  if (address) {
-    return `https://www.google.com/maps?q=${encodeURIComponent(address)}`;
-  }
-  return null;
-}
-
 /** Fetch the bundled logo asset as raw bytes for embedding in the workbook. */
 async function loadLogoBytes(): Promise<ArrayBuffer> {
   const res = await fetch(logoUrl);
@@ -108,7 +98,10 @@ function userTimeZone(): string {
   }
 }
 
-export async function exportToXlsx(report: MultiVehicleReport): Promise<void> {
+export async function exportToXlsx(
+  report: MultiVehicleReport,
+  session: GeotabSessionInfo | null
+): Promise<void> {
   const wb = new ExcelJS.Workbook();
   wb.creator = "GPSFMS Engine Hours by Zone";
   wb.created = new Date();
@@ -121,9 +114,9 @@ export async function exportToXlsx(report: MultiVehicleReport): Promise<void> {
     console.warn("[EHZ] Logo embed failed (continuing without):", err);
   }
 
-  await writeSegmentsSheet(wb, report, logoImageId);
-  writeZonesSheet(wb, report);
-  writeMetadataSheet(wb, report);
+  await writeSegmentsSheet(wb, report, logoImageId, session);
+  writeZonesSheet(wb, report, session);
+  writeMetadataSheet(wb, report, session);
   writeFailuresSheet(wb, report);
 
   const buf = await wb.xlsx.writeBuffer();
@@ -184,7 +177,8 @@ const SEGMENTS_HEADER_ROW = 8;
 async function writeSegmentsSheet(
   wb: ExcelJS.Workbook,
   report: MultiVehicleReport,
-  logoImageId: number | null
+  logoImageId: number | null,
+  session: GeotabSessionInfo | null
 ) {
   const seg = wb.addWorksheet("Segments", {
     views: [{ state: "frozen", ySplit: SEGMENTS_HEADER_ROW, xSplit: 1 }],
@@ -227,6 +221,12 @@ async function writeSegmentsSheet(
       `${formatDateTime(report.fromDate)} — ${formatDateTime(report.toDate)}`,
     ],
     ["Time Zone:", userTimeZone()],
+    [
+      "Database:",
+      session?.database
+        ? `${session.database} (${session.server})`
+        : "(unknown — standalone export)",
+    ],
     ["Cluster radius:", `${(report.radiusMeters / 1609.34).toFixed(2)} miles`],
     ["Generated:", formatDateTime(new Date())],
   ];
@@ -290,14 +290,14 @@ async function writeSegmentsSheet(
           destination = formatLocation(s.toZoneId, s.toAddress);
           // Map link points to the destination so the user can see where
           // this trip ended up.
-          url = mapsUrl(s.toLat, s.toLng, s.toAddress);
+          url = mapUrlForPoint(session, s.toLat, s.toLng, s.toAddress);
         } else {
           // Stops sit at a single location — fill both columns the same
           // way so filters like "Origin = Z1" still surface the stop.
           const loc = formatLocation(s.clusterId, s.address);
           origin = loc;
           destination = loc;
-          url = mapsUrl(s.lat, s.lng, s.address);
+          url = mapUrlForPoint(session, s.lat, s.lng, s.address);
         }
 
         r.getCell(1).value = v.deviceName;
@@ -342,7 +342,11 @@ async function writeSegmentsSheet(
 // Zones sheet
 // ----------------------------------------------------------------------
 
-function writeZonesSheet(wb: ExcelJS.Workbook, report: MultiVehicleReport) {
+function writeZonesSheet(
+  wb: ExcelJS.Workbook,
+  report: MultiVehicleReport,
+  session: GeotabSessionInfo | null
+) {
   const zones = wb.addWorksheet("Zones");
   zones.columns = [
     { header: "Vehicle", key: "vehicle", width: 22 },
@@ -375,7 +379,7 @@ function writeZonesSheet(wb: ExcelJS.Workbook, report: MultiVehicleReport) {
       row.getCell(6).value = c.visits;
       row.getCell(7).value = msToHours(c.totalStoppedMs);
       row.getCell(8).value = secToHours(c.totalEngineSeconds);
-      const url = mapsUrl(c.centerLat, c.centerLng, c.address);
+      const url = mapUrlForPoint(session, c.centerLat, c.centerLng, c.address);
       if (url) {
         row.getCell(9).value = { text: "Open in Maps", hyperlink: url };
         row.getCell(9).font = LINK_FONT;
@@ -388,7 +392,11 @@ function writeZonesSheet(wb: ExcelJS.Workbook, report: MultiVehicleReport) {
 // Metadata sheet (full provenance) — kept as-is for archival
 // ----------------------------------------------------------------------
 
-function writeMetadataSheet(wb: ExcelJS.Workbook, report: MultiVehicleReport) {
+function writeMetadataSheet(
+  wb: ExcelJS.Workbook,
+  report: MultiVehicleReport,
+  session: GeotabSessionInfo | null
+) {
   const meta = wb.addWorksheet("Report Metadata");
   meta.columns = [
     { header: "Field", key: "field", width: 28 },
@@ -397,6 +405,8 @@ function writeMetadataSheet(wb: ExcelJS.Workbook, report: MultiVehicleReport) {
   styleHeaderRow(meta.getRow(1));
   meta.addRows([
     { field: "Report", value: "Engine Hours by Zone" },
+    { field: "Database", value: session?.database ?? "(unknown)" },
+    { field: "Server", value: session?.server ?? "(unknown)" },
     { field: "Time Zone", value: userTimeZone() },
     { field: "From", value: formatDateTime(report.fromDate) },
     { field: "To", value: formatDateTime(report.toDate) },

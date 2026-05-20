@@ -12,6 +12,23 @@ export interface GeotabApi {
     success: (result: unknown) => void,
     failure: (err: unknown) => void
   ) => void;
+  /**
+   * Returns the current credentials and the active server hostname.
+   * The callback gets `(credentials, server)` — credentials.database is
+   * the URL slug (e.g. "gpsfms_pilot") and server is the host (e.g.
+   * "my.geotab.com" or a partner-specific server).
+   */
+  getSession?: (
+    callback: (
+      credentials: { database: string; userName: string; sessionId: string },
+      server: string
+    ) => void
+  ) => void;
+}
+
+export interface GeotabSessionInfo {
+  database: string;
+  server: string;
 }
 
 export interface GeotabPageState {

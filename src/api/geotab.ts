@@ -11,6 +11,7 @@ import type {
   GeotabAddress,
   GeotabDevice,
   GeotabGroup,
+  GeotabSessionInfo,
   GeotabStatusData,
   GeotabTrip,
 } from "../types";
@@ -55,6 +56,40 @@ export function friendlyError(err: unknown): string {
     if (e.message) return e.message;
   }
   return String(err);
+}
+
+/**
+ * Resolve the current session — database slug + active server hostname.
+ *
+ * Uses the Add-In API's `getSession(cb)` (callback-style, no Promise) and
+ * wraps it. If the API doesn't expose getSession or it times out (rare),
+ * we resolve with empty strings so callers can fall back gracefully.
+ */
+export function fetchSession(api: GeotabApi): Promise<GeotabSessionInfo> {
+  return new Promise((resolve) => {
+    if (typeof api.getSession !== "function") {
+      resolve({ database: "", server: "" });
+      return;
+    }
+    let settled = false;
+    const safeResolve = (s: GeotabSessionInfo) => {
+      if (settled) return;
+      settled = true;
+      resolve(s);
+    };
+    // Hard timeout so we never block app render on a stuck getSession.
+    setTimeout(() => safeResolve({ database: "", server: "" }), 3000);
+    try {
+      api.getSession((credentials, server) => {
+        safeResolve({
+          database: credentials?.database ?? "",
+          server: server || "my.geotab.com",
+        });
+      });
+    } catch {
+      safeResolve({ database: "", server: "" });
+    }
+  });
 }
 
 /** Fetch the full Group list keyed by id. */
