@@ -7,7 +7,9 @@
  *   Sheet 2: "Vehicles"     — per-vehicle spot-check: the latest engine-hours
  *                             reading (matches the MyGeotab Asset edit page)
  *                             alongside the max Exit we report, with a
- *                             Match / Close / Review status flag.
+ *                             Match / Close / Review data-match flag and a
+ *                             separate Install Health flag that catches
+ *                             3-wire devices with a stuck-on ignition wire.
  *   Sheet 3: "Zone Summary" — global per-zone roll-up across ALL vehicles
  *                             (pivot-ready: each zone gets one row with total
  *                             visits, hours, vehicle count).
@@ -346,19 +348,27 @@ async function writeSegmentsSheet(
 // ----------------------------------------------------------------------
 
 /**
- * One row per selected vehicle. Surfaces the latest
- * `DiagnosticEngineHoursAdjustmentId` reading (the same value the MyGeotab
- * Asset edit page shows) alongside our computed max Exit for this report
- * so an operator can verify the report against the platform in a glance.
+ * One row per selected vehicle. Surfaces:
+ *  - The latest `DiagnosticEngineHoursAdjustmentId` reading (same value the
+ *    MyGeotab Asset edit page shows) and our computed max Exit, so an
+ *    operator can verify the report against the platform in a glance.
+ *  - The latest `DiagnosticIgnitionId` event and an install-health flag
+ *    that catches 3-wire devices with a stuck-on ignition (the kind of
+ *    wiring issue that inflates ignition-mode engine-hours numbers).
  *
- * Status column thresholds:
+ * Data-match status thresholds:
  *   |Δ| < 0.10 hrs  → "Match"   (effectively identical)
  *   |Δ| < 1.00 hrs  → "Close"   (within an hour — expected timing drift)
  *   otherwise        → "Review"  (worth a manual look)
  *
- * Δ is positive when our report goes higher than the Asset reading (which
- * is normal if the report was run after the asset snapshot timestamp).
+ * Install-health thresholds (on the latest ignition event):
+ *   off                        → "OK"           (clean — engine is off)
+ *   on AND age < 24 h          → "OK"           (running normally right now)
+ *   on AND age >= 24 h         → "Stuck-on Xd"  (likely wiring failure)
+ *   no ignition data on file   → "No ignition data"
  */
+const STUCK_ON_THRESHOLD_HOURS = 24;
+
 function writeVehiclesSheet(
   wb: ExcelJS.Workbook,
   report: MultiVehicleReport
@@ -370,16 +380,23 @@ function writeVehiclesSheet(
     { header: "Asset Reading Time", key: "readTime", width: 22 },
     { header: "Max Exit — this report (hrs)", key: "maxExit", width: 28 },
     { header: "Δ (report − asset, hrs)", key: "delta", width: 22 },
-    { header: "Status", key: "status", width: 12 },
+    { header: "Data Match", key: "status", width: 14 },
     { header: "Segments", key: "segs", width: 10 },
     { header: "Trips", key: "trips", width: 8 },
     { header: "Stops", key: "stops", width: 8 },
     { header: "Stop hrs", key: "stopHrs", width: 12 },
     { header: "Trip hrs", key: "tripHrs", width: 12 },
+    { header: "Last Ignition Event", key: "ignTime", width: 22 },
+    { header: "Last Ignition State", key: "ignState", width: 16 },
+    { header: "Install Health", key: "install", width: 18 },
     { header: "Error", key: "error", width: 40 },
   ];
+  const COL_COUNT = 15;
   styleHeaderRow(ws.getRow(1));
-  ws.autoFilter = { from: { row: 1, column: 1 }, to: { row: 1, column: 12 } };
+  ws.autoFilter = {
+    from: { row: 1, column: 1 },
+    to: { row: 1, column: COL_COUNT },
+  };
   ws.views = [{ state: "frozen", ySplit: 1, xSplit: 1 }];
 
   const vehicles = report.vehicles
@@ -393,10 +410,27 @@ function writeVehiclesSheet(
     zebra = !zebra;
     row.getCell(1).value = v.deviceName;
 
+    // Install-health and last-ignition columns apply even to error rows,
+    // because we may still have fetched the ignition event before failing.
+    const ignTime = v.latestIgnition
+      ? formatDateTime(v.latestIgnition.dateTime)
+      : "(none on record)";
+    const ignState = v.latestIgnition
+      ? v.latestIgnition.on
+        ? "On"
+        : "Off"
+      : "Unknown";
+    const { label: installLabel, severity: installSeverity } =
+      classifyInstallHealth(v.latestIgnition);
+
     if (v.error) {
       row.getCell(6).value = "Error";
-      row.getCell(12).value = v.error;
-      if (zebra) stripeRow(row, 12);
+      row.getCell(12).value = ignTime;
+      row.getCell(13).value = ignState;
+      row.getCell(14).value = installLabel;
+      row.getCell(15).value = v.error;
+      paintInstallCell(row.getCell(14), installSeverity);
+      if (zebra) stripeRow(row, COL_COUNT);
       continue;
     }
 
@@ -444,8 +478,11 @@ function writeVehiclesSheet(
     row.getCell(9).value = v.totalStops;
     row.getCell(10).value = Number((v.totalStopSeconds / 3600).toFixed(2));
     row.getCell(11).value = Number((v.totalTripSeconds / 3600).toFixed(2));
+    row.getCell(12).value = ignTime;
+    row.getCell(13).value = ignState;
+    row.getCell(14).value = installLabel;
 
-    // Soft color hint on the Status cell so mismatches catch the eye.
+    // Soft color hint on the Data Match cell so mismatches catch the eye.
     const statusCell = row.getCell(6);
     if (status === "Match") {
       statusCell.font = { color: { argb: "FF15803D" }, bold: true };
@@ -455,7 +492,50 @@ function writeVehiclesSheet(
       statusCell.font = { color: { argb: "FFB91C1C" }, bold: true };
     }
 
-    if (zebra) stripeRow(row, 12);
+    paintInstallCell(row.getCell(14), installSeverity);
+
+    if (zebra) stripeRow(row, COL_COUNT);
+  }
+}
+
+/** Severity of an install-health classification. Drives cell coloring. */
+type InstallSeverity = "ok" | "warn" | "bad" | "neutral";
+
+/**
+ * Decide whether the device's latest ignition event indicates a healthy
+ * install or a stuck-on wiring failure. See the threshold doc on
+ * writeVehiclesSheet for the rules.
+ */
+function classifyInstallHealth(
+  latest: { dateTime: string; on: boolean } | null | undefined
+): { label: string; severity: InstallSeverity } {
+  if (!latest) {
+    return { label: "No ignition data", severity: "neutral" };
+  }
+  if (!latest.on) {
+    return { label: "OK", severity: "ok" };
+  }
+  const ageMs = Date.now() - new Date(latest.dateTime).getTime();
+  const ageHours = ageMs / (1000 * 60 * 60);
+  if (ageHours < STUCK_ON_THRESHOLD_HOURS) {
+    return { label: "OK", severity: "ok" };
+  }
+  const days = Math.floor(ageHours / 24);
+  const remHours = Math.floor(ageHours - days * 24);
+  const ageLabel = days >= 1 ? `${days}d ${remHours}h` : `${Math.floor(ageHours)}h`;
+  return {
+    label: `Stuck-on (${ageLabel})`,
+    severity: ageHours >= 7 * 24 ? "bad" : "warn",
+  };
+}
+
+function paintInstallCell(cell: ExcelJS.Cell, severity: InstallSeverity) {
+  if (severity === "ok") {
+    cell.font = { color: { argb: "FF15803D" }, bold: true };
+  } else if (severity === "warn") {
+    cell.font = { color: { argb: "FFB45309" }, bold: true };
+  } else if (severity === "bad") {
+    cell.font = { color: { argb: "FFB91C1C" }, bold: true };
   }
 }
 

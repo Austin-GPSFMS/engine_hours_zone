@@ -121,6 +121,19 @@ export interface EngineHoursAnchor {
 }
 
 /**
+ * The most recent DiagnosticIgnitionId reading for a device. Used by the
+ * Vehicles spot-check sheet to surface install-health issues: a 3-wire
+ * device whose ignition-on event has no matching off after 24+ hours is
+ * very likely a stuck-on wiring problem.
+ */
+export interface LatestIgnition {
+  /** ISO timestamp of the last ignition state change we have on file. */
+  dateTime: string;
+  /** True if the last event was ignition-on, false if ignition-off. */
+  on: boolean;
+}
+
+/**
  * A single stop period (gap between two consecutive trips) on a device.
  * Carries both the entry and exit cumulative metric readings so we can
  * show "200.45 → 203.55" alongside the delta.
@@ -232,6 +245,12 @@ export interface VehicleBucket {
    * (true 3-wire installs) — in that case Entry/Exit are relative cumulative.
    */
   anchor?: EngineHoursAnchor | null;
+  /**
+   * The latest ignition-state event we have on record for the device,
+   * regardless of mode. Populated by every report run for the Vehicles
+   * spot-check sheet's install-health column.
+   */
+  latestIgnition?: LatestIgnition | null;
   error?: string;
 }
 

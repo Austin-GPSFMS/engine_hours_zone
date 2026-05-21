@@ -15,6 +15,7 @@ import type {
   GeotabSessionInfo,
   GeotabStatusData,
   GeotabTrip,
+  LatestIgnition,
   Metric,
 } from "../types";
 
@@ -192,6 +193,54 @@ export async function fetchEngineHoursAnchor(
           : acc
       );
       return { dateTime: latest.dateTime, value: latest.data };
+    }
+  }
+  return null;
+}
+
+/**
+ * Find the most recent DiagnosticIgnitionId record for a device, regardless
+ * of when it was reported. Returns the latest state (on/off) and timestamp.
+ *
+ * Used by the Vehicles spot-check sheet to flag install-health issues: a
+ * device whose last ignition event was "on" more than 24 hours ago without
+ * a corresponding "off" is almost certainly a wiring problem (loose terminal,
+ * splice failure, etc.) and will inflate ignition-mode engine-hour values.
+ *
+ * Same staircase lookback as fetchEngineHoursAnchor — 30d → 365d → 5y — so
+ * we never spend bandwidth on a 5-year window for a device that reported
+ * yesterday.
+ */
+export async function fetchLatestIgnition(
+  api: GeotabApi,
+  deviceId: string
+): Promise<LatestIgnition | null> {
+  const now = Date.now();
+  const windows = [
+    30 * 24 * 60 * 60 * 1000,
+    365 * 24 * 60 * 60 * 1000,
+    5 * 365 * 24 * 60 * 60 * 1000,
+  ];
+  for (const lookback of windows) {
+    const from = new Date(now - lookback).toISOString();
+    const to = new Date(now).toISOString();
+    const records = await apiCall<GeotabStatusData[]>(api, "Get", {
+      typeName: "StatusData",
+      search: {
+        deviceSearch: { id: deviceId },
+        diagnosticSearch: { id: IGNITION_DIAGNOSTIC_ID },
+        fromDate: from,
+        toDate: to,
+      },
+      resultsLimit: 500,
+    });
+    if (records && records.length > 0) {
+      const latest = records.reduce((acc, r) =>
+        !acc || new Date(r.dateTime).getTime() > new Date(acc.dateTime).getTime()
+          ? r
+          : acc
+      );
+      return { dateTime: latest.dateTime, on: latest.data === 1 };
     }
   }
   return null;

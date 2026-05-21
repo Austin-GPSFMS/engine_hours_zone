@@ -25,6 +25,7 @@ import type {
   GeotabDevice,
   GeotabStatusData,
   GeotabTrip,
+  LatestIgnition,
   Metric,
   MultiVehicleReport,
   Stop,
@@ -34,6 +35,7 @@ import type {
 import {
   fetchAddresses,
   fetchEngineHoursAnchor,
+  fetchLatestIgnition,
   fetchTripsAndStatus,
   friendlyError,
 } from "../api/geotab";
@@ -53,6 +55,7 @@ interface PartialBucket {
   statusData: GeotabStatusData[];
   stops: Stop[];
   anchor: EngineHoursAnchor | null;
+  latestIgnition: LatestIgnition | null;
   error?: string;
 }
 
@@ -92,12 +95,14 @@ async function processDevice(
   metric: Metric
 ): Promise<PartialBucket> {
   try {
-    // Always fetch the latest engine-hours-adjustment reading so the
-    // Vehicles spot-check sheet can compare what we computed against
-    // what the MyGeotab Asset edit page would show. In Ignition mode
-    // the anchor is also used by metricValueAt as the back-projection
-    // origin; in Engine Hours mode it's display/verification only.
-    const anchor = await fetchEngineHoursAnchor(api, deviceId);
+    // Run both lookups in parallel — they're independent, so we save a
+    // round-trip per device. The anchor (engine-hours adjustment) backs
+    // the spot-check column; the latest ignition event backs the install-
+    // health column that surfaces 3-wire installs stuck "on".
+    const [anchor, latestIgnition] = await Promise.all([
+      fetchEngineHoursAnchor(api, deviceId),
+      fetchLatestIgnition(api, deviceId),
+    ]);
 
     const { trips, statusData } = await fetchTripsAndStatus(
       api,
@@ -123,6 +128,7 @@ async function processDevice(
       statusData,
       stops,
       anchor,
+      latestIgnition,
     };
   } catch (err) {
     return {
@@ -132,6 +138,7 @@ async function processDevice(
       statusData: [],
       stops: [],
       anchor: null,
+      latestIgnition: null,
       error: friendlyError(err),
     };
   }
@@ -203,6 +210,7 @@ export async function buildMultiVehicleReport({
         totalStops: 0,
         totalTrips: 0,
         anchor: p.anchor,
+        latestIgnition: p.latestIgnition,
         error: p.error,
       };
     }
@@ -254,6 +262,7 @@ export async function buildMultiVehicleReport({
       totalStops: p.stops.length,
       totalTrips: p.trips.length,
       anchor: p.anchor,
+      latestIgnition: p.latestIgnition,
     };
   });
 
