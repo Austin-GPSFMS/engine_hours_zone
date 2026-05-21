@@ -4,13 +4,17 @@
  *   Sheet 1: "Segments"     — primary chronological view per vehicle/day
  *                             with logo + metadata header + Origin/Destination
  *                             + Map hyperlink into MyGeotab.
- *   Sheet 2: "Zone Summary" — global per-zone roll-up across ALL vehicles
+ *   Sheet 2: "Vehicles"     — per-vehicle spot-check: the latest engine-hours
+ *                             reading (matches the MyGeotab Asset edit page)
+ *                             alongside the max Exit we report, with a
+ *                             Match / Close / Review status flag.
+ *   Sheet 3: "Zone Summary" — global per-zone roll-up across ALL vehicles
  *                             (pivot-ready: each zone gets one row with total
  *                             visits, hours, vehicle count).
- *   Sheet 3: "Vehicle Zones" — per-vehicle × per-zone breakdown, also pivot-
+ *   Sheet 4: "Vehicle Zones" — per-vehicle × per-zone breakdown, also pivot-
  *                              friendly when filtering one vehicle at a time.
- *   Sheet 4: "Report Metadata" — full provenance block.
- *   Sheet 5: "Failed Vehicles" — only emitted when any errors occurred.
+ *   Sheet 5: "Report Metadata" — full provenance block.
+ *   Sheet 6: "Failed Vehicles" — only emitted when any errors occurred.
  *
  * Brand color: GPSFMS navy `#25477B`.
  */
@@ -126,6 +130,7 @@ export async function exportToXlsx(
   }
 
   await writeSegmentsSheet(wb, report, logoImageId, session);
+  writeVehiclesSheet(wb, report);
   writeZoneSummarySheet(wb, report, session);
   writeVehicleZonesSheet(wb, report, session);
   writeMetadataSheet(wb, report, session);
@@ -337,7 +342,132 @@ async function writeSegmentsSheet(
 }
 
 // ----------------------------------------------------------------------
-// Sheet 2: Zone Summary — global per-zone roll-up (pivot-ready)
+// Sheet 2: Vehicles — per-vehicle spot-check against the Asset page
+// ----------------------------------------------------------------------
+
+/**
+ * One row per selected vehicle. Surfaces the latest
+ * `DiagnosticEngineHoursAdjustmentId` reading (the same value the MyGeotab
+ * Asset edit page shows) alongside our computed max Exit for this report
+ * so an operator can verify the report against the platform in a glance.
+ *
+ * Status column thresholds:
+ *   |Δ| < 0.10 hrs  → "Match"   (effectively identical)
+ *   |Δ| < 1.00 hrs  → "Close"   (within an hour — expected timing drift)
+ *   otherwise        → "Review"  (worth a manual look)
+ *
+ * Δ is positive when our report goes higher than the Asset reading (which
+ * is normal if the report was run after the asset snapshot timestamp).
+ */
+function writeVehiclesSheet(
+  wb: ExcelJS.Workbook,
+  report: MultiVehicleReport
+) {
+  const ws = wb.addWorksheet("Vehicles");
+  ws.columns = [
+    { header: "Vehicle", key: "vehicle", width: 24 },
+    { header: "Asset Engine Hours (hrs)", key: "assetHrs", width: 22 },
+    { header: "Asset Reading Time", key: "readTime", width: 22 },
+    { header: "Max Exit — this report (hrs)", key: "maxExit", width: 28 },
+    { header: "Δ (report − asset, hrs)", key: "delta", width: 22 },
+    { header: "Status", key: "status", width: 12 },
+    { header: "Segments", key: "segs", width: 10 },
+    { header: "Trips", key: "trips", width: 8 },
+    { header: "Stops", key: "stops", width: 8 },
+    { header: "Stop hrs", key: "stopHrs", width: 12 },
+    { header: "Trip hrs", key: "tripHrs", width: 12 },
+    { header: "Error", key: "error", width: 40 },
+  ];
+  styleHeaderRow(ws.getRow(1));
+  ws.autoFilter = { from: { row: 1, column: 1 }, to: { row: 1, column: 12 } };
+  ws.views = [{ state: "frozen", ySplit: 1, xSplit: 1 }];
+
+  const vehicles = report.vehicles
+    .slice()
+    .sort((a, b) => a.deviceName.localeCompare(b.deviceName));
+
+  let rowIdx = 2;
+  let zebra = false;
+  for (const v of vehicles) {
+    const row = ws.getRow(rowIdx++);
+    zebra = !zebra;
+    row.getCell(1).value = v.deviceName;
+
+    if (v.error) {
+      row.getCell(6).value = "Error";
+      row.getCell(12).value = v.error;
+      if (zebra) stripeRow(row, 12);
+      continue;
+    }
+
+    const assetHrs = v.anchor ? secToHours(v.anchor.value) : null;
+    const readTime = v.anchor
+      ? formatDateTime(v.anchor.dateTime)
+      : "(no engine-hours reading)";
+
+    let maxExitSec: number | null = null;
+    for (const day of v.days) {
+      for (const s of day.segments) {
+        if (s.exitSeconds != null) {
+          if (maxExitSec == null || s.exitSeconds > maxExitSec) {
+            maxExitSec = s.exitSeconds;
+          }
+        }
+      }
+    }
+    const maxExitHrs = secToHours(maxExitSec);
+
+    let delta: number | null = null;
+    let status: string;
+    if (assetHrs == null) {
+      status = "No anchor";
+    } else if (maxExitHrs == null) {
+      status = "No segments";
+    } else {
+      delta = Number((maxExitHrs - assetHrs).toFixed(2));
+      const abs = Math.abs(delta);
+      if (abs < 0.1) status = "Match";
+      else if (abs < 1.0) status = "Close";
+      else status = "Review";
+    }
+
+    row.getCell(2).value = assetHrs;
+    row.getCell(3).value = readTime;
+    row.getCell(4).value = maxExitHrs;
+    row.getCell(5).value = delta;
+    row.getCell(6).value = status;
+    row.getCell(7).value = v.days.reduce(
+      (sum, d) => sum + d.segments.length,
+      0
+    );
+    row.getCell(8).value = v.totalTrips;
+    row.getCell(9).value = v.totalStops;
+    row.getCell(10).value = Number((v.totalStopSeconds / 3600).toFixed(2));
+    row.getCell(11).value = Number((v.totalTripSeconds / 3600).toFixed(2));
+
+    // Soft color hint on the Status cell so mismatches catch the eye.
+    const statusCell = row.getCell(6);
+    if (status === "Match") {
+      statusCell.font = { color: { argb: "FF15803D" }, bold: true };
+    } else if (status === "Close") {
+      statusCell.font = { color: { argb: "FFB45309" }, bold: true };
+    } else if (status === "Review") {
+      statusCell.font = { color: { argb: "FFB91C1C" }, bold: true };
+    }
+
+    if (zebra) stripeRow(row, 12);
+  }
+}
+
+function stripeRow(row: ExcelJS.Row, colCount: number) {
+  for (let c = 1; c <= colCount; c++) {
+    const cell = row.getCell(c);
+    if (!cell.fill) cell.fill = STRIPE_FILL;
+  }
+}
+
+// ----------------------------------------------------------------------
+// Sheet 3: Zone Summary — global per-zone roll-up (pivot-ready)
 // ----------------------------------------------------------------------
 
 function writeZoneSummarySheet(

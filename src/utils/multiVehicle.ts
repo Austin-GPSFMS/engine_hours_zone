@@ -92,10 +92,12 @@ async function processDevice(
   metric: Metric
 ): Promise<PartialBucket> {
   try {
-    const anchor =
-      metric === "ignition"
-        ? await fetchEngineHoursAnchor(api, deviceId)
-        : null;
+    // Always fetch the latest engine-hours-adjustment reading so the
+    // Vehicles spot-check sheet can compare what we computed against
+    // what the MyGeotab Asset edit page would show. In Ignition mode
+    // the anchor is also used by metricValueAt as the back-projection
+    // origin; in Engine Hours mode it's display/verification only.
+    const anchor = await fetchEngineHoursAnchor(api, deviceId);
 
     const { trips, statusData } = await fetchTripsAndStatus(
       api,
