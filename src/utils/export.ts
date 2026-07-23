@@ -10,9 +10,10 @@
  *                             Match / Close / Review data-match flag and a
  *                             separate Install Health flag that catches
  *                             3-wire devices with a stuck-on ignition wire.
- *   Sheet 3: "Zone Summary" — global per-zone roll-up across ALL vehicles
- *                             (pivot-ready: each zone gets one row with total
- *                             visits, hours, vehicle count).
+ *   Sheet 3: "Zone Summary" — per-zone breakdown grouped by vehicle: each
+ *                             zone gets a bolded "Fleet total" header row
+ *                             followed by one row per vehicle that visited
+ *                             it (visits, stopped hrs, accumulated hrs).
  *   Sheet 4: "Vehicle Zones" — per-vehicle × per-zone breakdown, also pivot-
  *                              friendly when filtering one vehicle at a time.
  *   Sheet 5: "Report Metadata" — full provenance block.
@@ -547,9 +548,23 @@ function stripeRow(row: ExcelJS.Row, colCount: number) {
 }
 
 // ----------------------------------------------------------------------
-// Sheet 3: Zone Summary — global per-zone roll-up (pivot-ready)
+// Sheet 3: Zone Summary — per-zone breakdown grouped by vehicle
 // ----------------------------------------------------------------------
 
+/** Bolded "Fleet total" header row per zone — subtle GPSFMS-tinted band. */
+const ZONE_HEADER_FILL: ExcelJS.Fill = {
+  type: "pattern",
+  pattern: "solid",
+  fgColor: { argb: "FFEAF1FA" },
+};
+
+/**
+ * Per-zone breakdown. Each zone gets a bolded "Fleet total" row with the
+ * roll-up numbers followed by one row per vehicle that visited the zone
+ * (visits, stopped hrs, accumulated hrs for that vehicle at this zone
+ * specifically). Zone metadata (id/address/lat/lng) is repeated on every
+ * row so pivot tables and filters still work cleanly.
+ */
 function writeZoneSummarySheet(
   wb: ExcelJS.Workbook,
   report: MultiVehicleReport,
@@ -559,44 +574,112 @@ function writeZoneSummarySheet(
   ws.columns = [
     { header: "Zone", key: "zone", width: 8 },
     { header: "Address", key: "address", width: 45 },
+    { header: "Vehicle", key: "vehicle", width: 26 },
+    { header: "Visits", key: "visits", width: 10 },
+    { header: "Total Stopped (hrs)", key: "stopped", width: 18 },
+    { header: "Hours Accumulated", key: "hours", width: 20 },
     { header: "Latitude", key: "lat", width: 12 },
     { header: "Longitude", key: "lng", width: 12 },
-    { header: "Vehicles", key: "vehicles", width: 10 },
-    { header: "Total Visits", key: "visits", width: 12 },
-    { header: "Total Stopped (hrs)", key: "stopped", width: 18 },
-    { header: "Total Hours Accumulated", key: "hours", width: 22 },
     { header: "Map", key: "map", width: 14 },
   ];
+  const COL_COUNT = 9;
   styleHeaderRow(ws.getRow(1));
-  ws.autoFilter = { from: { row: 1, column: 1 }, to: { row: 1, column: 9 } };
-  ws.views = [{ state: "frozen", ySplit: 1 }];
+  ws.autoFilter = {
+    from: { row: 1, column: 1 },
+    to: { row: 1, column: COL_COUNT },
+  };
+  ws.views = [{ state: "frozen", ySplit: 1, xSplit: 1 }];
 
-  // Sort by total hours descending so the heaviest zones bubble to the top.
-  const sorted: Cluster[] = report.zones
+  const deviceNameById = new Map<string, string>();
+  for (const v of report.vehicles) {
+    deviceNameById.set(v.deviceId, v.deviceName);
+  }
+
+  // Heaviest zones bubble to the top.
+  const sortedZones: Cluster[] = report.zones
     .slice()
     .sort((a, b) => b.totalSeconds - a.totalSeconds);
 
   let rowIdx = 2;
-  for (const c of sorted) {
-    const row = ws.getRow(rowIdx++);
-    row.getCell(1).value = c.id;
-    row.getCell(2).value = c.address ?? "";
-    row.getCell(3).value = Number(c.centerLat.toFixed(6));
-    row.getCell(4).value = Number(c.centerLng.toFixed(6));
-    row.getCell(5).value = c.vehicleIds.size;
-    row.getCell(6).value = c.visits;
-    row.getCell(7).value = msToHours(c.totalStoppedMs);
-    row.getCell(8).value = secToHours(c.totalSeconds);
-    const url = mapUrlForPoint(session, c.centerLat, c.centerLng, c.address);
-    if (url) {
-      row.getCell(9).value = { text: "Open in Maps", hyperlink: url };
-      row.getCell(9).font = LINK_FONT;
+  for (const c of sortedZones) {
+    // Aggregate this zone's stops by deviceId.
+    const byVehicle = new Map<
+      string,
+      { visits: number; stoppedMs: number; seconds: number }
+    >();
+    for (const s of c.stops) {
+      let bucket = byVehicle.get(s.deviceId);
+      if (!bucket) {
+        bucket = { visits: 0, stoppedMs: 0, seconds: 0 };
+        byVehicle.set(s.deviceId, bucket);
+      }
+      bucket.visits += 1;
+      bucket.stoppedMs += s.durationMs;
+      if (s.accumulatedSeconds != null) bucket.seconds += s.accumulatedSeconds;
+    }
+
+    const mapUrl = mapUrlForPoint(
+      session,
+      c.centerLat,
+      c.centerLng,
+      c.address
+    );
+
+    // Fleet-total header row — bolded and tinted so the zone groups are
+    // visually distinct when scrolling through the sheet.
+    const headerRow = ws.getRow(rowIdx++);
+    headerRow.getCell(1).value = c.id;
+    headerRow.getCell(2).value = c.address ?? "";
+    headerRow.getCell(3).value = `Fleet total (${byVehicle.size} vehicle${
+      byVehicle.size === 1 ? "" : "s"
+    })`;
+    headerRow.getCell(4).value = c.visits;
+    headerRow.getCell(5).value = msToHours(c.totalStoppedMs);
+    headerRow.getCell(6).value = secToHours(c.totalSeconds);
+    headerRow.getCell(7).value = Number(c.centerLat.toFixed(6));
+    headerRow.getCell(8).value = Number(c.centerLng.toFixed(6));
+    if (mapUrl) {
+      headerRow.getCell(9).value = { text: "Open in Maps", hyperlink: mapUrl };
+      headerRow.getCell(9).font = { ...LINK_FONT, bold: true };
+    }
+    for (let col = 1; col <= COL_COUNT; col++) {
+      const cell = headerRow.getCell(col);
+      if (col !== 9) {
+        // Preserve the LINK_FONT on the map cell; bold the rest.
+        cell.font = { ...(cell.font ?? {}), bold: true };
+      }
+      cell.fill = ZONE_HEADER_FILL;
+    }
+
+    // Per-vehicle rows sorted by accumulated hours desc so the biggest
+    // contributors sit right under the fleet-total row.
+    const vehicleRows = Array.from(byVehicle.entries())
+      .map(([deviceId, stats]) => ({
+        deviceId,
+        deviceName: deviceNameById.get(deviceId) ?? deviceId,
+        ...stats,
+      }))
+      .sort((a, b) => b.seconds - a.seconds);
+
+    for (const v of vehicleRows) {
+      const row = ws.getRow(rowIdx++);
+      row.getCell(1).value = c.id;
+      row.getCell(2).value = c.address ?? "";
+      row.getCell(3).value = v.deviceName;
+      row.getCell(4).value = v.visits;
+      row.getCell(5).value = msToHours(v.stoppedMs);
+      row.getCell(6).value = secToHours(v.seconds);
+      row.getCell(7).value = Number(c.centerLat.toFixed(6));
+      row.getCell(8).value = Number(c.centerLng.toFixed(6));
+      // Skip the map link on per-vehicle rows — it's identical to the
+      // header row's link and adds visual noise on zones with many vehicles.
     }
   }
 }
 
 // ----------------------------------------------------------------------
-// Sheet 3: Vehicle × Zone breakdown
+// Sheet 4: Vehicle Zones — vehicle-first × zone breakdown (mirror of
+// Sheet 3, sorted from the other direction for pivot flexibility)
 // ----------------------------------------------------------------------
 
 function writeVehicleZonesSheet(
