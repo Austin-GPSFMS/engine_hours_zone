@@ -13,13 +13,12 @@ import type {
   Cluster,
   DayBucket,
   EngineHoursAnchor,
-  GeotabStatusData,
   GeotabTrip,
   Metric,
   Segment,
   Stop,
 } from "../types";
-import { metricValueAt } from "./metric";
+import { metricValueAt, type MetricInputs } from "./metric";
 
 /** 1 mile expressed in meters — used as the default cluster radius. */
 export const ONE_MILE_METERS = 1609.34;
@@ -46,9 +45,9 @@ export function haversineMeters(
 
 /**
  * Build the per-vehicle list of stops. Each stop sits between trip[i].stop
- * and trip[i].nextTripStart. Entry/exit metric seconds are computed against
- * the supplied StatusData (engine hours interpolation OR ignition integration,
- * dispatched on `metric`).
+ * and trip[i].nextTripStart. Entry/exit metric seconds are computed via
+ * `metricValueAt`, which since v3.6.0 accepts both engine-hours records and
+ * ignition events so it can use ignition-aware math in Engine Hours mode.
  *
  * The caller passes the owning deviceId so each Stop is tagged and can be
  * pooled across vehicles for global clustering.
@@ -56,7 +55,7 @@ export function haversineMeters(
 export function buildStops(
   deviceId: string,
   trips: GeotabTrip[],
-  statusData: GeotabStatusData[],
+  inputs: MetricInputs,
   metric: Metric,
   anchor?: EngineHoursAnchor | null
 ): Stop[] {
@@ -66,8 +65,8 @@ export function buildStops(
     const sp = trip.stopPoint;
     if (!sp || sp.x == null || sp.y == null) continue;
     if (!trip.nextTripStart) continue;
-    const entry = metricValueAt(statusData, trip.stop, metric, anchor);
-    const exit = metricValueAt(statusData, trip.nextTripStart, metric, anchor);
+    const entry = metricValueAt(inputs, trip.stop, metric, anchor);
+    const exit = metricValueAt(inputs, trip.nextTripStart, metric, anchor);
     const accumulated =
       entry != null && exit != null ? Math.max(0, exit - entry) : null;
     stops.push({
@@ -156,7 +155,7 @@ export function clusterStops(
  */
 export function buildSegments(
   trips: GeotabTrip[],
-  statusData: GeotabStatusData[],
+  inputs: MetricInputs,
   stops: Stop[],
   clusterByTripIndex: Map<number, Cluster>,
   metric: Metric,
@@ -169,8 +168,8 @@ export function buildSegments(
   const segments: Segment[] = [];
   for (let i = 0; i < trips.length; i++) {
     const trip = trips[i];
-    const entry = metricValueAt(statusData, trip.start, metric, anchor);
-    const exit = metricValueAt(statusData, trip.stop, metric, anchor);
+    const entry = metricValueAt(inputs, trip.start, metric, anchor);
+    const exit = metricValueAt(inputs, trip.stop, metric, anchor);
     const acc =
       entry != null && exit != null ? Math.max(0, exit - entry) : null;
 

@@ -23,7 +23,6 @@ import type {
   EngineHoursAnchor,
   GeotabApi,
   GeotabDevice,
-  GeotabStatusData,
   GeotabTrip,
   LatestIgnition,
   Metric,
@@ -45,6 +44,7 @@ import {
   buildStops,
   clusterStops,
 } from "./cluster";
+import type { MetricInputs } from "./metric";
 
 const CONCURRENCY = 3;
 
@@ -52,7 +52,9 @@ interface PartialBucket {
   deviceId: string;
   deviceName: string;
   trips: GeotabTrip[];
-  statusData: GeotabStatusData[];
+  /** Both diagnostic feeds are carried so buildSegments can use ignition-
+   *  aware Engine Hours math (v3.6.0+). */
+  metricInputs: MetricInputs;
   stops: Stop[];
   anchor: EngineHoursAnchor | null;
   latestIgnition: LatestIgnition | null;
@@ -104,19 +106,21 @@ async function processDevice(
       fetchLatestIgnition(api, deviceId),
     ]);
 
-    const { trips, statusData } = await fetchTripsAndStatus(
-      api,
-      deviceId,
-      fromDate,
-      toDate,
-      metric,
-      anchor?.dateTime
-    );
+    const { trips, engineHoursRecords, ignitionEvents } =
+      await fetchTripsAndStatus(
+        api,
+        deviceId,
+        fromDate,
+        toDate,
+        metric,
+        anchor?.dateTime
+      );
+    const metricInputs: MetricInputs = { engineHoursRecords, ignitionEvents };
     const meaningfulTrips = trips.filter(isMeaningfulTrip);
     const stops = buildStops(
       deviceId,
       meaningfulTrips,
-      statusData,
+      metricInputs,
       metric,
       anchor
     );
@@ -125,7 +129,7 @@ async function processDevice(
       deviceId,
       deviceName,
       trips: meaningfulTrips,
-      statusData,
+      metricInputs,
       stops,
       anchor,
       latestIgnition,
@@ -135,7 +139,7 @@ async function processDevice(
       deviceId,
       deviceName,
       trips: [],
-      statusData: [],
+      metricInputs: { engineHoursRecords: [], ignitionEvents: [] },
       stops: [],
       anchor: null,
       latestIgnition: null,
@@ -226,7 +230,7 @@ export async function buildMultiVehicleReport({
 
     const segments = buildSegments(
       p.trips,
-      p.statusData,
+      p.metricInputs,
       p.stops,
       clusterByTripIndex,
       metric,

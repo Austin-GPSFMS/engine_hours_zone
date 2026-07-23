@@ -28,11 +28,8 @@ export const ENGINE_HOURS_DIAGNOSTIC_ID = "DiagnosticEngineHoursAdjustmentId";
  *  on every device including 3-wire installs that lack engine-bus data. */
 export const IGNITION_DIAGNOSTIC_ID = "DiagnosticIgnitionId";
 
-function diagnosticIdFor(metric: Metric): string {
-  return metric === "engineHours"
-    ? ENGINE_HOURS_DIAGNOSTIC_ID
-    : IGNITION_DIAGNOSTIC_ID;
-}
+// (diagnosticIdFor removed in v3.6.0 — the pipeline always dual-fetches
+//  both diagnostics so Engine Hours mode can be ignition-aware.)
 
 /** Generic typed call wrapper. Resolves with the API result, rejects on failure. */
 export function apiCall<T = unknown>(
@@ -247,46 +244,51 @@ export async function fetchLatestIgnition(
 }
 
 /**
- * Fetch trips and the chosen metric's StatusData for a single device.
+ * Fetch trips + BOTH the engine-hours diagnostic and the ignition diagnostic
+ * for a single device. Since v3.6.0 we always pull both so that Engine Hours
+ * mode can use ignition-aware math (per-segment Δ from real ignition-on time)
+ * regardless of which mode the user picked.
  *
- * Pad varies by metric:
- *  - engineHours: ±1 hour is plenty, the counter changes smoothly.
- *  - ignition:    needs more padding for context. We always pad 24h before
- *                 the report window to establish the prior state. On the
- *                 `to` side, when an anchor timestamp is provided we extend
- *                 through that anchor (plus 1h), so the integration between
- *                 the anchor and each segment timestamp has continuous
- *                 event coverage.
+ * Padding rules (both diagnostics use the same window):
+ *  - Front pad: 24h before the report window, so we always have the last
+ *    event before the window to establish initial ignition state and the
+ *    last engine-hours sample bracketing the first trip.
+ *  - Back pad: 1h past the report window's end. If an anchor timestamp is
+ *    supplied and it falls later than that, extend through the anchor + 1h
+ *    so the integration between the anchor and each segment has continuous
+ *    event coverage.
  *
- * Both arrays come back time-sorted.
+ * `diagnosticIdFor(metric)` is retained for callers that want the primary
+ * metric only, but the main pipeline uses this dual-fetch.
  */
 export async function fetchTripsAndStatus(
   api: GeotabApi,
   deviceId: string,
   fromDate: string,
   toDate: string,
-  metric: Metric,
+  _metric: Metric,
   anchorEnd?: string | null
-): Promise<{ trips: GeotabTrip[]; statusData: GeotabStatusData[] }> {
-  const fromPadMs =
-    metric === "ignition" ? 24 * 60 * 60 * 1000 : 60 * 60 * 1000;
+): Promise<{
+  trips: GeotabTrip[];
+  engineHoursRecords: GeotabStatusData[];
+  ignitionEvents: GeotabStatusData[];
+}> {
+  const fromPadMs = 24 * 60 * 60 * 1000;
   const statusFrom = new Date(
     new Date(fromDate).getTime() - fromPadMs
   ).toISOString();
 
-  // Determine the upper bound of the StatusData fetch. For ignition with
-  // an anchor we need events all the way through the anchor timestamp.
+  // Determine the upper bound of the StatusData fetch. If an anchor is
+  // supplied and it sits past the report window, extend through it so
+  // ignition-anchored back-projection has continuous event coverage.
   let statusToMs = new Date(toDate).getTime() + 60 * 60 * 1000;
-  if (metric === "ignition" && anchorEnd) {
+  if (anchorEnd) {
     const anchorMs = new Date(anchorEnd).getTime() + 60 * 60 * 1000;
     if (anchorMs > statusToMs) statusToMs = anchorMs;
-  } else if (metric === "ignition") {
-    // No anchor — keep the original 24h trailing pad.
-    statusToMs = new Date(toDate).getTime() + 24 * 60 * 60 * 1000;
   }
   const statusTo = new Date(statusToMs).toISOString();
 
-  const [trips, statusData] = await Promise.all([
+  const [trips, engineHoursRecords, ignitionEvents] = await Promise.all([
     apiCall<GeotabTrip[]>(api, "Get", {
       typeName: "Trip",
       search: {
@@ -300,7 +302,17 @@ export async function fetchTripsAndStatus(
       typeName: "StatusData",
       search: {
         deviceSearch: { id: deviceId },
-        diagnosticSearch: { id: diagnosticIdFor(metric) },
+        diagnosticSearch: { id: ENGINE_HOURS_DIAGNOSTIC_ID },
+        fromDate: statusFrom,
+        toDate: statusTo,
+      },
+      resultsLimit: 50000,
+    }),
+    apiCall<GeotabStatusData[]>(api, "Get", {
+      typeName: "StatusData",
+      search: {
+        deviceSearch: { id: deviceId },
+        diagnosticSearch: { id: IGNITION_DIAGNOSTIC_ID },
         fromDate: statusFrom,
         toDate: statusTo,
       },
@@ -308,15 +320,18 @@ export async function fetchTripsAndStatus(
     }),
   ]);
 
+  const byDate = (
+    a: GeotabStatusData,
+    b: GeotabStatusData
+  ): number =>
+    new Date(a.dateTime).getTime() - new Date(b.dateTime).getTime();
+
   return {
     trips: trips
       .slice()
       .sort((a, b) => new Date(a.start).getTime() - new Date(b.start).getTime()),
-    statusData: statusData
-      .slice()
-      .sort(
-        (a, b) => new Date(a.dateTime).getTime() - new Date(b.dateTime).getTime()
-      ),
+    engineHoursRecords: engineHoursRecords.slice().sort(byDate),
+    ignitionEvents: ignitionEvents.slice().sort(byDate),
   };
 }
 
